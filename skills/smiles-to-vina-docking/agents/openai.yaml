@@ -1,0 +1,7 @@
+interface:
+  display_name: "SMILES To Vina Docking"
+  short_description: "Iteratively design, dock, and triage lead analogs with AutoDock Vina."
+  default_prompt: "Use $smiles-to-vina-docking to optimize this lead SMILES against my Vina baseline and record every analog result."
+
+policy:
+  allow_implicit_invocation: true
