@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 from rdkit import Chem, RDLogger
-from rdkit.Chem import AllChem, Crippen, Descriptors, Lipinski, rdMolDescriptors
+from rdkit.Chem import AllChem, Crippen, Descriptors, Lipinski, QED, rdMolDescriptors
 
 try:
     from rdkit.Chem.MolStandardize import rdMolStandardize
@@ -38,6 +38,8 @@ RDLogger.DisableLog("rdApp.error")
 
 LEDGER_FILENAME = "dock_history.csv"
 CONFIG_FILENAME = "history_config.json"
+DEFAULT_TASK_ROOT = Path("~/vina_task2")
+DEFAULT_LEDGER_DIR = DEFAULT_TASK_ROOT / "dock_history"
 AFFINITY_RE = re.compile(r"^\s*1\s+(-?\d+(?:\.\d+)?)\s+", re.MULTILINE)
 PDBQT_AFFINITY_RE = re.compile(r"REMARK VINA RESULT:\s+(-?\d+(?:\.\d+)?)")
 HBOND_ELEMENTS = {"N", "O", "S"}
@@ -51,6 +53,28 @@ LEDGER_FIELDS = [
     "ancestor_smiles",
     "parent_smiles",
     "edit_label",
+    "refinement_source",
+    "druglike_refinement_score",
+    "refinement_qed",
+    "synthetic_score_proxy",
+    "property_window_score",
+    "qed_component_score",
+    "synthetic_component_score",
+    "property_component_score",
+    "parent_similarity_score",
+    "expert_similarity_score",
+    "reference_similarity_score",
+    "reference_partial_similarity_score",
+    "qve_component_score",
+    "inherited_structure_score",
+    "structural_alert_penalty_score",
+    "refinement_parent_similarity",
+    "refinement_expert_similarity",
+    "kinase_reference_similarity",
+    "kinase_reference_partial_similarity",
+    "qve_delta",
+    "structural_alert_penalty",
+    "refinement_generation",
     "input_smiles",
     "smiles",
     "canonical_smiles",
@@ -81,6 +105,31 @@ LEDGER_FIELDS = [
     "log_path",
     "prep_log_path",
     "reason",
+]
+
+REFINEMENT_LEDGER_FIELDS = [
+    "refinement_source",
+    "druglike_refinement_score",
+    "refinement_qed",
+    "synthetic_score_proxy",
+    "property_window_score",
+    "qed_component_score",
+    "synthetic_component_score",
+    "property_component_score",
+    "parent_similarity_score",
+    "expert_similarity_score",
+    "reference_similarity_score",
+    "reference_partial_similarity_score",
+    "qve_component_score",
+    "inherited_structure_score",
+    "structural_alert_penalty_score",
+    "refinement_parent_similarity",
+    "refinement_expert_similarity",
+    "kinase_reference_similarity",
+    "kinase_reference_partial_similarity",
+    "qve_delta",
+    "structural_alert_penalty",
+    "refinement_generation",
 ]
 
 
@@ -171,6 +220,7 @@ def properties(smiles: str) -> dict[str, float | int]:
     if mol is None:
         return {}
     return {
+        "qed": round(float(QED.qed(mol)), 4),
         "mw": round(float(Descriptors.MolWt(mol)), 3),
         "logp": round(float(Crippen.MolLogP(mol)), 3),
         "hbd": int(Lipinski.NumHDonors(mol)),
@@ -180,6 +230,21 @@ def properties(smiles: str) -> dict[str, float | int]:
         "heavy_atoms": int(mol.GetNumHeavyAtoms()),
         "formal_charge": int(sum(atom.GetFormalCharge() for atom in mol.GetAtoms())),
     }
+
+
+def analog_property_rejection(smiles: str, args: argparse.Namespace) -> str:
+    props = properties(smiles)
+    if not props:
+        return "property_parse_failed"
+    if float(props.get("mw", 0)) > float(args.max_analog_mw):
+        return f"mw>{args.max_analog_mw}"
+    if int(props.get("rot_bonds", 99)) > int(args.max_analog_rot_bonds):
+        return f"rot_bonds>{args.max_analog_rot_bonds}"
+    if float(props.get("tpsa", 0)) > float(args.max_analog_tpsa):
+        return f"tpsa>{args.max_analog_tpsa}"
+    if float(props.get("qed", 0)) < float(args.min_analog_qed):
+        return f"qed<{args.min_analog_qed}"
+    return ""
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -194,6 +259,15 @@ def read_csv(path: Path) -> list[dict[str, str]]:
             continue
     text = raw.decode("utf-8", errors="replace")
     return list(csv.DictReader(io.StringIO(text)))
+
+
+def clean_float(value: object, default: float = 0.0) -> float:
+    try:
+        if value in ("", None):
+            return default
+        return float(value)
+    except Exception:
+        return default
 
 
 def append_csv(path: Path, rows: list[dict[str, str | int | float]]) -> None:
@@ -218,8 +292,44 @@ def write_csv(path: Path, rows: list[dict[str, str | int | float]]) -> None:
             writer.writerow({field: row.get(field, "") for field in LEDGER_FIELDS})
 
 
+def refinement_meta_from_args(args: argparse.Namespace) -> dict[str, str]:
+    meta: dict[str, str] = {}
+    for field in REFINEMENT_LEDGER_FIELDS:
+        value = getattr(args, field, "")
+        if value not in ("", None):
+            meta[field] = str(value)
+    return meta
+
+
+def merge_refinement_meta(row: dict[str, str | int | float], meta: dict[str, str]) -> None:
+    if not meta:
+        return
+    current_score = clean_float(row.get("druglike_refinement_score"), default=float("-inf"))
+    incoming_score = clean_float(meta.get("druglike_refinement_score"), default=float("-inf"))
+    should_replace_scores = incoming_score >= current_score
+    for field, value in meta.items():
+        if value in ("", None):
+            continue
+        if field == "refinement_source":
+            existing = str(row.get(field, ""))
+            row[field] = value if not existing else existing
+            continue
+        if should_replace_scores or row.get(field, "") in ("", None):
+            row[field] = value
+
+
 def ledger_path(ledger_dir: Path) -> Path:
     return ledger_dir / LEDGER_FILENAME
+
+
+def normalize_ledger_dir(path: Path | None) -> Path:
+    raw = path or DEFAULT_LEDGER_DIR
+    expanded = raw.expanduser()
+    if expanded.name.lower() == "dock_hisotry" and not expanded.exists():
+        corrected = expanded.with_name("dock_history")
+        if corrected.exists():
+            return corrected.resolve()
+    return expanded.resolve()
 
 
 def next_seq(rows: list[dict[str, str]]) -> int:
@@ -279,6 +389,15 @@ def arg_or_config(args: argparse.Namespace, name: str, default: str | int | None
     if value not in (None, ""):
         return value
     return load_saved_config(args.ledger_dir.expanduser().resolve()).get(name, default)
+
+
+def resolve_executable(value: str, ledger_dir: Path, filename: str) -> str:
+    if command_exists(value):
+        return value
+    local = ledger_dir.parent / "vina_bin" / filename
+    if local.exists():
+        return str(local)
+    return value
 
 
 def parse_vina_config(path: Path, args: argparse.Namespace) -> VinaBox:
@@ -798,11 +917,14 @@ def dock_one(
         if not prep_ok:
             reason = "pdbqt_preparation_failed"
         else:
-            dock_ok, dock_affinity, _ = dock(vina, receptor, pdbqt_path, pose_path, log_path, box, seed)
+            dock_ok, dock_affinity, dock_output = dock(vina, receptor, pdbqt_path, pose_path, log_path, box, seed)
             if dock_ok and dock_affinity is not None:
                 affinity = dock_affinity
             else:
-                reason = "vina_failed_or_no_affinity"
+                if "No such file or directory" in dock_output or "not found" in dock_output:
+                    reason = "vina_executable_not_found"
+                else:
+                    reason = "vina_failed_or_no_affinity"
     except Exception as exc:
         reason = str(exc)
     metrics = pose_metrics(pose_path, receptor_atoms, cluster_cutoff) if not reason else {}
@@ -822,7 +944,8 @@ def dock_one(
 
 
 def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
-    ledger_dir = args.ledger_dir.expanduser().resolve()
+    ledger_dir = normalize_ledger_dir(getattr(args, "ledger_dir", None))
+    args.ledger_dir = ledger_dir
     ledger_dir.mkdir(parents=True, exist_ok=True)
     save_config(ledger_dir, args)
     receptor_arg = arg_or_config(args, "receptor")
@@ -831,9 +954,9 @@ def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
         raise ValueError("provide --receptor and --config once; later runs can read history_config.json")
     receptor = Path(str(receptor_arg)).expanduser().resolve()
     config = Path(str(config_arg)).expanduser().resolve()
-    vina = str(arg_or_config(args, "vina", "vina"))
-    meeko = str(arg_or_config(args, "meeko", "mk_prepare_ligand.py"))
-    obabel = str(arg_or_config(args, "obabel", "obabel"))
+    vina = resolve_executable(str(arg_or_config(args, "vina", "vina")), ledger_dir, "vina")
+    meeko = resolve_executable(str(arg_or_config(args, "meeko", "mk_prepare_ligand.py")), ledger_dir, "mk_prepare_ligand.py")
+    obabel = resolve_executable(str(arg_or_config(args, "obabel", "obabel")), ledger_dir, "obabel")
     box = parse_vina_config(config, args)
     print(f"vina_cpu={box.cpu} exhaustiveness={box.exhaustiveness} num_modes={box.num_modes}", flush=True)
     receptor_atoms = parse_receptor_atoms(receptor)
@@ -845,6 +968,10 @@ def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
 
     input_smiles = clean_smiles(args.smiles)
     input_nickname = clean_smiles(getattr(args, "nickname", ""))
+    input_ancestor_smiles = clean_smiles(getattr(args, "ancestor_smiles", ""))
+    input_parent_smiles = clean_smiles(getattr(args, "parent_smiles", ""))
+    input_edit_label = clean_smiles(getattr(args, "edit_label", "")) or "input_smiles"
+    refinement_meta = refinement_meta_from_args(args)
     ids = smiles_identity(input_smiles, input_smiles)
     existing = find_existing(existing_rows, ids)
     new_rows: list[dict[str, str | int | float]] = []
@@ -852,6 +979,13 @@ def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
         print(f"input_exists=true seq_id={existing.get('seq_id')}", flush=True)
         if input_nickname:
             existing["nickname"] = input_nickname
+        if input_ancestor_smiles and not existing.get("ancestor_smiles"):
+            existing["ancestor_smiles"] = input_ancestor_smiles
+        if input_parent_smiles and not existing.get("parent_smiles"):
+            existing["parent_smiles"] = input_parent_smiles
+        if input_edit_label and existing.get("edit_label") in ("", "input_smiles"):
+            existing["edit_label"] = input_edit_label
+        merge_refinement_meta(existing, refinement_meta)
         active = [existing]
     else:
         seq = seq_id(seq_number)
@@ -861,9 +995,9 @@ def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
             smiles=ids.get("canonical_smiles") or input_smiles,
             input_smiles=input_smiles,
             nickname=input_nickname,
-            ancestor_smiles=ids.get("canonical_smiles") or input_smiles,
-            parent_smiles="",
-            edit_label="input_smiles",
+            ancestor_smiles=input_ancestor_smiles or ids.get("canonical_smiles") or input_smiles,
+            parent_smiles=input_parent_smiles,
+            edit_label=input_edit_label,
             ledger_dir=ledger_dir,
             receptor=receptor,
             receptor_atoms=receptor_atoms,
@@ -874,6 +1008,7 @@ def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
             seed=args.seed,
             cluster_cutoff=args.internal_cluster_rmsd_cutoff,
         )
+        merge_refinement_meta(row, refinement_meta)
         print(f"[dock] {seq} ancestor affinity={row.get('affinity_kcal_mol')} reason={row.get('reason', '')}", flush=True)
         new_rows.append(row)
         active = [{key: str(value) for key, value in row.items()}]
@@ -891,6 +1026,11 @@ def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
             for candidate_smiles, edit_label in candidates:
                 cids = smiles_identity(candidate_smiles, candidate_smiles)
                 if not cids.get("canonical_smiles") or any(same_molecule(cids, old) for old in seen):
+                    continue
+                rejection = analog_property_rejection(cids["canonical_smiles"], args)
+                if rejection:
+                    print(f"[skip] gen={generation} parent={parent.get('seq_id')} {edit_label} reason={rejection}", flush=True)
+                    seen.append(cids)
                     continue
                 seq = seq_id(seq_number)
                 seq_number += 1
@@ -938,12 +1078,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smiles", required=True)
     parser.add_argument("--nickname", default="", help="Optional user-facing label to preserve in the ledger")
-    parser.add_argument("--history-dir", "--ledger-dir", dest="ledger_dir", metavar="HISTORY_DIR", type=Path, required=True)
+    parser.add_argument("--history-dir", "--ledger-dir", dest="ledger_dir", metavar="HISTORY_DIR", type=Path, default=DEFAULT_LEDGER_DIR)
     parser.add_argument("--receptor", type=Path)
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--vina", default="vina")
-    parser.add_argument("--meeko", default="mk_prepare_ligand.py")
-    parser.add_argument("--obabel", default="obabel")
+    parser.add_argument("--vina")
+    parser.add_argument("--meeko")
+    parser.add_argument("--obabel")
     parser.add_argument("--max-rounds", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=24)
     parser.add_argument("--seed", type=int, default=42)
@@ -959,6 +1099,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--drastic", dest="drastic_only", action="store_true")
     parser.add_argument("--deterministic-batch", action="store_true")
     parser.add_argument("--redock-existing", action="store_true")
+    parser.add_argument("--min-analog-qed", type=float, default=0.20)
+    parser.add_argument("--max-analog-mw", type=float, default=650.0)
+    parser.add_argument("--max-analog-rot-bonds", type=int, default=14)
+    parser.add_argument("--max-analog-tpsa", type=float, default=180.0)
     return parser
 
 

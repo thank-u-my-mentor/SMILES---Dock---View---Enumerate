@@ -32,6 +32,30 @@ The history directory contains:
 - `sdf/` and `pdbqt/`: prepared ligand files.
 - `ranked_history.csv`: optional ranking output created only when ranking is requested.
 
+For the user's long-running Task2 workspace, assume this stable layout unless told otherwise:
+
+```text
+~/vina_task2/
+  dock_history/
+    dock_history.csv
+    history_config.json
+    binding_score_analysis.csv
+    binding_score_correlations.csv
+    binding_score_missing_smiles.csv
+    sdf/
+    pdbqt/
+    poses/
+    logs/
+    prep_logs/
+  druglike_refinement/
+  binding_score_mode_analysis/
+  vina_bin/
+```
+
+Both `dock_smiles.py` and the shared docking utilities default to
+`~/vina_task2/dock_history`. Users may still pass `--history-dir` explicitly for a
+different project.
+
 There is no permanent global lead in the docking history. The ledger records ancestry directly with SMILES strings, not with a pile of separate ids.
 
 SMILES strings are not unique. Always preserve the user's `input_smiles` exactly as typed, plus `nickname`. Use canonical SMILES for chemical duplicate detection, and treat exact `input_smiles` only as a retrieval alias or provenance field. Do not rely on tautomer or InChIKey columns for this workflow.
@@ -81,8 +105,20 @@ python /path/to/smiles-to-vina-docking/scripts/dock_smiles.py \
   --history-dir ~/vina_task2/dock_history
 ```
 
+Because `~/vina_task2/dock_history` is the default, this can also be:
+
+```bash
+python /path/to/smiles-to-vina-docking/scripts/dock_smiles.py \
+  --smiles "<SMILES>"
+```
+
 If the molecule already exists, the tool reports the existing `seq_id` and does not redock by default. Use `--redock-existing` only when the user truly wants another docking event for the same molecule.
 `--nickname` is optional and stored as the user-facing label for that row when provided.
+
+If many rows suddenly show `vina_executable_not_found` or `vina_failed_or_no_affinity`
+with logs like `No such file or directory: 'vina'`, pass the full Vina path once again,
+for example `--vina ~/vina_task2/vina_bin/vina`. The tool also tries the common
+`<history parent>/vina_bin/vina` location when an old config only contains bare `vina`.
 
 ## Generating Analogs
 
@@ -117,11 +153,28 @@ Analog edit controls:
 
 Batch order is randomized by default for exploration. Use `--deterministic-batch` only for debugging.
 
+Generated analogs pass a lightweight property gate before docking. This prevents multi-round analog generation from spending time on molecules that are already far outside a practical drug-like space. The gate applies only to generated analogs, not to the manually supplied input SMILES.
+
+Default analog property gate:
+
+- `--min-analog-qed 0.20`
+- `--max-analog-mw 650`
+- `--max-analog-rot-bonds 14`
+- `--max-analog-tpsa 180`
+
+For drug-likeness rescue work, tighten these values, for example `--min-analog-qed 0.40 --max-analog-mw 550 --max-analog-rot-bonds 10 --max-analog-tpsa 140`.
+
 ## History Columns
 
 `dock_history.csv` should stay readable and chronological. Prefer one table over many redundant CSVs.
 
 Recommended columns in the current minimal ledger:
+
+`dock_history.csv` may also contain optional `druglike-pocket-refiner` columns such as
+`refinement_source`, `druglike_refinement_score`, `refinement_qed`,
+`qed_component_score`, `reference_similarity_score`, `reference_partial_similarity_score`,
+`qve_delta`, and `refinement_generation`. These fields are blank for ordinary docking rows
+and populated when refined candidates are docked or matched back into the history.
 
 - `seq_id`: simple sequence id such as `S000001`.
 - `timestamp`: when the row was created.
