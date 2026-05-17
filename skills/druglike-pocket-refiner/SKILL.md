@@ -43,7 +43,7 @@ Then generate cleaner analogs that:
 - preserve parent similarity and likely kinase-like features,
 - avoid blindly growing huge pocket-filling molecules.
 
-Default refinement is trimming-oriented. It uses delete/shrink/drastic edits and does not use growth/add edits unless `--allow-add` is explicitly passed. This skill is meant to rescue overgrown pocket-filling molecules, not make them larger.
+Default refinement is trimming-oriented. It prioritizes delete/shrink/drastic edits and only uses growth/add edits as an automatic low-sample exploration fallback when a round cannot produce enough candidates. Explicit `--allow-add` makes growth edits first-class candidates. This skill is meant to rescue overgrown pocket-filling molecules, not blindly make them larger.
 
 Scaffold-level edits are enabled by default:
 - conservative bioisostere/linker replacements such as amide to ketone/amine/ether/thioether linkers,
@@ -77,11 +77,14 @@ Useful switches:
 - `--max-rounds N`: maximum refinement generations; default 10. `--max-iterations` and `--rounds` are accepted as old aliases.
 - `--target-refinement-score X`: stop early when any candidate reaches this 0-10 score; default 5.0.
 - `--batch-size N`: maximum new candidates generated per refinement round; default 300. `--max-candidates` is accepted as an old alias.
+- `--beam-size N`: number of best candidates kept as parents for the next round; default 1 follows only the single best-scoring lineage.
 - `--progress-interval N`: print progress every N generated candidates inside each round; default 25.
 - `--dock-top-candidates N`: dock the top N refined candidates through `smiles-to-vina-docking`, then write `druglike_refinement_docked_ranked.csv`.
 - `--no-scaffold-edits`: use only simple delete/shrink/drastic edits.
 - `--allow-qve-loss`: keep scaffold edits even when the local drug-like proxy does not improve.
 - `--allow-add`: permit growth edits; normally avoid this during rescue.
+
+With `--beam-size 1`, the best-scoring lineage remains the main route, but each round can backfill from a high-score parent pool and low-sample exploration candidates to make `--batch-size` meaningful. This avoids stopping early just because the current single best molecule has no strict QVE-improving child.
 
 `--expert-smiles` must be a valid RDKit SMILES. Invalid expert strings fail fast instead of
 silently falling back to unrelated historical anchors.
@@ -106,11 +109,11 @@ When `--dock-top-candidates` is used, docked refined molecules are also written 
 `dock_history.csv`. Their history rows preserve `ancestor_smiles`, `parent_smiles`, and a
 `druglike_refine_g*_...` edit label, so the docking ledger can trace each refined molecule
 back to the expert anchor and refinement operation.
-The same history rows also receive a refinement score snapshot: `druglike_refinement_score`,
-component scores, reference-similarity scores, `qve_delta`, alert penalty, and
-`refinement_generation`. If a molecule already exists in history, these fields are updated
-when the incoming refinement score is equal or better, while the existing docked pose/log
-record is preserved unless `--redock-refined` is used.
+The same history rows receive only `refinement_source` and `druglike_refinement_score`.
+Detailed component scores stay in the refinement output CSVs, keeping `dock_history.csv`
+readable as a long-running docking ledger. If a molecule already exists in history, the
+refinement score is updated when the incoming score is equal or better, while the existing
+docked pose/log record is preserved unless `--redock-refined` is used.
 
 Optionally build a kinase-biased ChEMBL reference SMILES table:
 

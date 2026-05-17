@@ -16,7 +16,8 @@ from functools import lru_cache
 from pathlib import Path
 
 from rdkit import Chem, DataStructs
-from rdkit.Chem import AllChem, Crippen, Descriptors, Lipinski, QED, rdChemReactions, rdMolDescriptors
+from rdkit.Chem import AllChem, Crippen, Descriptors, Lipinski, QED, rdChemReactions, rdFMCS, rdMolDescriptors
+from rdkit.Chem.Scaffolds import MurckoScaffold
 
 SMILES_SKILL = Path(__file__).resolve().parents[2] / "smiles-to-vina-docking" / "scripts"
 sys.path.insert(0, str(SMILES_SKILL))
@@ -25,6 +26,8 @@ import dock_utils as du  # noqa: E402
 DEFAULT_REFINEMENT_DIR = Path("~/vina_task2/druglike_refinement")
 _WORKER_REFERENCE_FPS: list[object] = []
 _WORKER_REFERENCE_PATTERN_FPS: list[object] = []
+_WORKER_REFERENCE_PROFILES: list[dict[str, object]] = []
+_WORKER_CHEMBL_SCAFFOLD_THRESHOLDS: tuple[float, ...] = (0.4, 0.3, 0.2)
 _WORKER_EXPERT_FPS: list[object] = []
 
 
@@ -75,6 +78,28 @@ def pattern_fingerprint(smiles: str) -> object | None:
     if m is None:
         return None
     return Chem.PatternFingerprint(m)
+
+
+@lru_cache(maxsize=200000)
+def murcko_scaffold_smiles(smiles: str) -> str:
+    m = mol(smiles)
+    if m is None:
+        return ""
+    try:
+        scaffold = MurckoScaffold.GetScaffoldForMol(m)
+        if scaffold is None or scaffold.GetNumHeavyAtoms() == 0:
+            return ""
+        return Chem.MolToSmiles(scaffold, canonical=True)
+    except Exception:
+        return ""
+
+
+@lru_cache(maxsize=200000)
+def scaffold_fingerprint(smiles: str) -> object | None:
+    scaffold = murcko_scaffold_smiles(smiles)
+    if not scaffold:
+        return None
+    return fingerprint(scaffold)
 
 
 def tanimoto(a: object | None, b: object | None) -> float:
@@ -427,6 +452,35 @@ def load_reference_pattern_fps(path: Path | None, max_rows: int) -> list[object]
     return fps
 
 
+def load_reference_profiles(path: Path | None, max_rows: int) -> list[dict[str, object]]:
+    if path is None or not path.expanduser().exists():
+        return []
+    rows = du.read_csv(path.expanduser())
+    profiles: list[dict[str, object]] = []
+    seen_scaffolds: set[str] = set()
+    for row in rows[:max_rows]:
+        smiles = row.get("smiles") or row.get("canonical_smiles") or row.get("canonical_smiles ") or row.get("SMILES")
+        canonical = can(smiles)
+        if not canonical:
+            continue
+        scaffold = murcko_scaffold_smiles(canonical)
+        if not scaffold or scaffold in seen_scaffolds:
+            continue
+        sfp = scaffold_fingerprint(canonical)
+        if sfp is None:
+            continue
+        seen_scaffolds.add(scaffold)
+        profiles.append(
+            {
+                "chembl_id": row.get("molecule_chembl_id", "") or row.get("chembl_id", ""),
+                "reference_smiles": canonical,
+                "reference_scaffold_smiles": scaffold,
+                "reference_scaffold_fp": sfp,
+            }
+        )
+    return profiles
+
+
 def max_reference_similarity(smiles: str, reference_fps: list[object]) -> float:
     fp = fingerprint(smiles)
     if fp is None or not reference_fps:
@@ -439,6 +493,101 @@ def max_reference_pattern_similarity(smiles: str, reference_pattern_fps: list[ob
     if fp is None or not reference_pattern_fps:
         return 0.0
     return round(max(DataStructs.BulkTanimotoSimilarity(fp, reference_pattern_fps)), 4)
+
+
+def parse_thresholds(text: str) -> tuple[float, ...]:
+    values: list[float] = []
+    for part in str(text).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            values.append(float(part))
+        except ValueError:
+            continue
+    values = sorted({value for value in values if value > 0}, reverse=True)
+    return tuple(values or [0.4, 0.3, 0.2])
+
+
+def scaffold_mcs_match(
+    smiles: str,
+    reference_profiles: list[dict[str, object]],
+    thresholds: tuple[float, ...],
+    prefilter_limit: int = 40,
+) -> dict[str, object]:
+    scaffold = murcko_scaffold_smiles(smiles)
+    sfp = scaffold_fingerprint(smiles)
+    if not scaffold or sfp is None or not reference_profiles:
+        return {
+            "chembl_scaffold_fraction": 0.0,
+            "chembl_scaffold_threshold_met": 0.0,
+            "chembl_scaffold_mcs_atoms": 0,
+            "chembl_scaffold_mcs_bonds": 0,
+            "chembl_scaffold_tanimoto": 0.0,
+            "chembl_reference_id": "",
+            "chembl_reference_scaffold_smiles": "",
+            "candidate_murcko_scaffold": scaffold,
+        }
+    ranked: list[tuple[float, dict[str, object]]] = []
+    for profile in reference_profiles:
+        ranked.append((tanimoto(sfp, profile.get("reference_scaffold_fp")), profile))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    candidate_mol = mol(scaffold)
+    candidate_atoms = candidate_mol.GetNumHeavyAtoms() if candidate_mol is not None else 0
+    best = {
+        "chembl_scaffold_fraction": 0.0,
+        "chembl_scaffold_threshold_met": 0.0,
+        "chembl_scaffold_mcs_atoms": 0,
+        "chembl_scaffold_mcs_bonds": 0,
+        "chembl_scaffold_tanimoto": 0.0,
+        "chembl_reference_id": "",
+        "chembl_reference_scaffold_smiles": "",
+        "candidate_murcko_scaffold": scaffold,
+    }
+    if candidate_mol is None or candidate_atoms == 0:
+        return best
+    threshold_set = tuple(thresholds or (0.4, 0.3, 0.2))
+    min_threshold = min(threshold_set)
+    for tan, profile in ranked[:prefilter_limit]:
+        ref_scaffold = str(profile.get("reference_scaffold_smiles", ""))
+        ref_mol = mol(ref_scaffold)
+        if ref_mol is None or ref_mol.GetNumHeavyAtoms() == 0:
+            continue
+        try:
+            mcs = rdFMCS.FindMCS(
+                [candidate_mol, ref_mol],
+                timeout=1,
+                ringMatchesRingOnly=True,
+                completeRingsOnly=True,
+                matchValences=False,
+            )
+        except Exception:
+            continue
+        if mcs.canceled or mcs.numAtoms <= 0:
+            continue
+        denominator = max(1, min(candidate_atoms, ref_mol.GetNumHeavyAtoms()))
+        fraction = round(float(mcs.numAtoms) / denominator, 4)
+        threshold_met = 0.0
+        for threshold in threshold_set:
+            if fraction >= threshold:
+                threshold_met = threshold
+                break
+        if fraction > float(best["chembl_scaffold_fraction"]):
+            best = {
+                "chembl_scaffold_fraction": fraction,
+                "chembl_scaffold_threshold_met": threshold_met,
+                "chembl_scaffold_mcs_atoms": int(mcs.numAtoms),
+                "chembl_scaffold_mcs_bonds": int(mcs.numBonds),
+                "chembl_scaffold_tanimoto": round(tan, 4),
+                "chembl_reference_id": profile.get("chembl_id", ""),
+                "chembl_reference_scaffold_smiles": ref_scaffold,
+                "candidate_murcko_scaffold": scaffold,
+            }
+        if threshold_met >= max(threshold_set):
+            break
+    if float(best["chembl_scaffold_fraction"]) < min_threshold:
+        best["chembl_scaffold_threshold_met"] = 0.0
+    return best
 
 
 REACTION_SMARTS: list[tuple[str, str]] = [
@@ -670,18 +819,25 @@ def generate_candidates(
     parents: list[dict[str, object]],
     max_rounds: int,
     batch_size: int,
+    beam_size: int,
     seed: int,
     allow_add: bool,
     scaffold_edits: bool,
     require_qve_gain: bool,
     score_fn=None,
     target_score: float | None = None,
+    min_generated_before_target_stop: int = 0,
     max_total_candidates: int | None = None,
     progress_interval: int = 25,
+    exclude_smiles: set[str] | None = None,
 ) -> list[dict[str, object]]:
     rng = random.Random(seed)
     seen = {str(parent["canonical_smiles"]) for parent in parents}
-    frontier = list(parents)
+    if exclude_smiles:
+        seen.update(smiles for smiles in exclude_smiles if smiles)
+    frontier = list(parents)[: max(1, beam_size)]
+    parent_pool = list(parents)
+    exhausted_parents: set[str] = set()
     generated: list[dict[str, object]] = []
     best_score = float("-inf")
     stop_reason = "max_rounds"
@@ -689,15 +845,62 @@ def generate_candidates(
         next_frontier: list[dict[str, object]] = []
         round_count = 0
         stop_now = False
-        rng.shuffle(frontier)
+        if score_fn is not None:
+            parent_pool.sort(key=lambda parent: clean_float(parent.get("_score"), default=float("-inf")), reverse=True)
+        parent_candidates: list[dict[str, object]] = []
+        parent_seen: set[str] = set()
+        for parent in [*frontier, *parent_pool]:
+            parent_smiles_key = str(parent.get("canonical_smiles", ""))
+            if not parent_smiles_key or parent_smiles_key in parent_seen or parent_smiles_key in exhausted_parents:
+                continue
+            parent_seen.add(parent_smiles_key)
+            parent_candidates.append(parent)
+            if len(parent_candidates) >= max(batch_size, beam_size, 1):
+                break
+        rng.shuffle(parent_candidates)
         print(
-            f"[refine] round={round_index}/{max_rounds} parents={len(frontier)} "
-            f"batch_size={batch_size} generated_total={len(generated)} best_score={best_score if best_score > -999 else ''}",
+            f"[refine] round={round_index}/{max_rounds} parents={len(parent_candidates)} "
+            f"batch_size={batch_size} beam_size={beam_size} generated_total={len(generated)} best_score={best_score if best_score > -999 else ''}",
             flush=True,
         )
-        for parent in frontier:
+        for parent in parent_candidates:
             parent_smiles = str(parent["canonical_smiles"])
+            parent_new_count = 0
             edits = refinement_edits(parent_smiles, allow_add, scaffold_edits, require_qve_gain)
+            if require_qve_gain and len(edits) < batch_size:
+                strict_smiles = {product for product, _ in edits}
+                relaxed_needed = max(0, batch_size - len(edits))
+                relaxed: list[tuple[str, str]] = []
+                for product, label in refinement_edits(parent_smiles, allow_add, scaffold_edits, False):
+                    if product in strict_smiles:
+                        continue
+                    relaxed.append((product, f"explore_qve_loss_{label}"))
+                    if len(relaxed) >= relaxed_needed:
+                        break
+                if relaxed:
+                    print(
+                        f"[refine] round={round_index} parent={parent.get('seq_id', '') or parent.get('source_parent', 'expert')} "
+                        f"strict_qve_candidates={len(edits)} relaxed_candidates={len(relaxed)}",
+                        flush=True,
+                    )
+                    edits.extend(relaxed)
+            if len(edits) < batch_size and not allow_add:
+                existing_products = {product for product, _ in edits}
+                add_needed = max(0, batch_size - len(edits))
+                add_explore: list[tuple[str, str]] = []
+                for product, label in refinement_edits(parent_smiles, True, scaffold_edits, False):
+                    if product in existing_products:
+                        continue
+                    add_explore.append((product, f"explore_add_{label}"))
+                    if len(add_explore) >= add_needed:
+                        break
+                if add_explore:
+                    print(
+                        f"[refine] round={round_index} parent={parent.get('seq_id', '') or parent.get('source_parent', 'expert')} "
+                        f"low_sample_candidates={len(edits)} add_explore_candidates={len(add_explore)}",
+                        flush=True,
+                    )
+                    edits.extend(add_explore)
             rng.shuffle(edits)
             for product, label in edits:
                 canonical = can(product)
@@ -730,6 +933,7 @@ def generate_candidates(
                         "_score": row_score,
                     }
                 )
+                parent_new_count += 1
                 round_count += 1
                 if progress_interval > 0 and round_count % progress_interval == 0:
                     print(
@@ -741,27 +945,60 @@ def generate_candidates(
                     stop_reason = "max_total_candidates"
                     print(f"[refine] stop reason={stop_reason} generated_total={len(generated)} best_score={best_score:.4f}", flush=True)
                     return generated
-                if target_score is not None and best_score >= target_score:
+                if (
+                    target_score is not None
+                    and best_score >= target_score
+                    and len(generated) >= max(1, min_generated_before_target_stop)
+                ):
                     stop_reason = "target_score"
-                    print(f"[refine] stop reason={stop_reason} best_score={best_score:.4f}", flush=True)
+                    print(
+                        f"[refine] stop reason={stop_reason} generated_total={len(generated)} "
+                        f"min_generated_before_target_stop={min_generated_before_target_stop} best_score={best_score:.4f}",
+                        flush=True,
+                    )
                     return generated
                 if round_count >= batch_size:
                     stop_now = True
                     break
             if stop_now:
                 break
+            if parent_new_count == 0:
+                exhausted_parents.add(parent_smiles)
         if score_fn is not None:
             next_frontier.sort(key=lambda parent: clean_float(parent.get("_score"), default=float("-inf")), reverse=True)
+        if next_frontier:
+            parent_pool.extend(next_frontier)
+            if score_fn is not None:
+                parent_pool.sort(key=lambda parent: clean_float(parent.get("_score"), default=float("-inf")), reverse=True)
+            dedup_pool: dict[str, dict[str, object]] = {}
+            for parent in parent_pool:
+                canonical = str(parent.get("canonical_smiles", ""))
+                if canonical and canonical not in dedup_pool:
+                    dedup_pool[canonical] = parent
+            parent_pool = list(dedup_pool.values())[: max(1000, batch_size * 5)]
         print(
             f"[refine] round={round_index} done generated_round={round_count} "
-            f"next_parents={len(next_frontier)} best_score={best_score:.4f}",
+            f"candidate_next_parents={len(next_frontier)} selected_next_parents={min(len(next_frontier), max(1, beam_size))} "
+            f"best_score={best_score:.4f}",
             flush=True,
         )
-        frontier = next_frontier[:batch_size]
+        frontier = next_frontier[: max(1, beam_size)]
         if not frontier:
-            stop_reason = "no_next_parents"
-            print(f"[refine] stop reason={stop_reason} generated_total={len(generated)} best_score={best_score:.4f}", flush=True)
-            break
+            fallback_frontier = [
+                parent for parent in parent_pool
+                if str(parent.get("canonical_smiles", "")) not in exhausted_parents
+            ][: max(1, beam_size)]
+            if fallback_frontier:
+                frontier = fallback_frontier
+                print(
+                    f"[refine] main lineage exhausted; fallback_parents={len(frontier)} "
+                    f"remaining_pool={len(parent_pool)}",
+                    flush=True,
+                )
+            else:
+                stop_reason = "no_next_parents"
+                print(f"[refine] stop reason={stop_reason} generated_total={len(generated)} best_score={best_score:.4f}", flush=True)
+                break
     else:
         print(f"[refine] stop reason={stop_reason} generated_total={len(generated)} best_score={best_score:.4f}", flush=True)
     return generated
@@ -771,6 +1008,8 @@ def score_candidate(
     row: dict[str, object],
     reference_fps: list[object],
     reference_pattern_fps: list[object],
+    reference_profiles: list[dict[str, object]],
+    chembl_scaffold_thresholds: tuple[float, ...],
     expert_fps: list[object],
 ) -> dict[str, object]:
     smiles = str(row["candidate_smiles"])
@@ -780,6 +1019,9 @@ def score_candidate(
     prop_score = window_score(props)
     ref_sim = max_reference_similarity(smiles, reference_fps)
     ref_partial_sim = max_reference_pattern_similarity(smiles, reference_pattern_fps)
+    scaffold_match = scaffold_mcs_match(smiles, reference_profiles, chembl_scaffold_thresholds)
+    scaffold_fraction = clean_float(scaffold_match.get("chembl_scaffold_fraction"))
+    scaffold_component = clamp01(scaffold_fraction / max(0.2, max(chembl_scaffold_thresholds or (0.4,))))
     fp = fingerprint(smiles)
     expert_sim = round(max([tanimoto(fp, expert_fp) for expert_fp in expert_fps] or [0.0]), 4)
     parent_sim = tanimoto(fp, fingerprint(str(row.get("parent_smiles", ""))))
@@ -796,6 +1038,7 @@ def score_candidate(
         "expert_similarity_score": 10.0 * expert_sim,
         "reference_similarity_score": 10.0 * ref_sim,
         "reference_partial_similarity_score": 10.0 * ref_partial_sim,
+        "chembl_scaffold_component_score": 10.0 * scaffold_component,
         "qve_component_score": 10.0 * qve_component,
         "inherited_structure_score": 10.0 * inherited_structure,
         "structural_alert_penalty_score": 10.0 * alert_penalty,
@@ -806,8 +1049,9 @@ def score_candidate(
         + 0.10 * components["property_component_score"]
         + 0.12 * components["parent_similarity_score"]
         + 0.10 * components["expert_similarity_score"]
-        + 0.12 * components["reference_similarity_score"]
-        + 0.10 * components["reference_partial_similarity_score"]
+        + 0.04 * components["reference_similarity_score"]
+        + 0.04 * components["reference_partial_similarity_score"]
+        + 0.18 * components["chembl_scaffold_component_score"]
         + 0.08 * components["qve_component_score"]
         + 0.12 * components["inherited_structure_score"]
         - 0.18 * components["structural_alert_penalty_score"]
@@ -823,6 +1067,7 @@ def score_candidate(
         "expert_similarity": expert_sim,
         "kinase_reference_similarity": ref_sim,
         "kinase_reference_partial_similarity": ref_partial_sim,
+        **scaffold_match,
         "parent_anchor_score": round(parent_anchor_score, 4),
         "parent_structural_footprint_score": round(parent_footprint, 4),
         "inherited_structure_raw": round(inherited_structure, 4),
@@ -832,64 +1077,61 @@ def score_candidate(
     }
 
 
-def init_score_worker(reference_fps: list[object], reference_pattern_fps: list[object], expert_fps: list[object]) -> None:
-    global _WORKER_REFERENCE_FPS, _WORKER_REFERENCE_PATTERN_FPS, _WORKER_EXPERT_FPS
+def init_score_worker(
+    reference_fps: list[object],
+    reference_pattern_fps: list[object],
+    reference_profiles: list[dict[str, object]],
+    chembl_scaffold_thresholds: tuple[float, ...],
+    expert_fps: list[object],
+) -> None:
+    global _WORKER_REFERENCE_FPS, _WORKER_REFERENCE_PATTERN_FPS, _WORKER_REFERENCE_PROFILES, _WORKER_CHEMBL_SCAFFOLD_THRESHOLDS, _WORKER_EXPERT_FPS
     _WORKER_REFERENCE_FPS = reference_fps
     _WORKER_REFERENCE_PATTERN_FPS = reference_pattern_fps
+    _WORKER_REFERENCE_PROFILES = reference_profiles
+    _WORKER_CHEMBL_SCAFFOLD_THRESHOLDS = chembl_scaffold_thresholds
     _WORKER_EXPERT_FPS = expert_fps
 
 
 def score_candidate_worker(row: dict[str, object]) -> dict[str, object]:
-    return score_candidate(row, _WORKER_REFERENCE_FPS, _WORKER_REFERENCE_PATTERN_FPS, _WORKER_EXPERT_FPS)
+    return score_candidate(
+        row,
+        _WORKER_REFERENCE_FPS,
+        _WORKER_REFERENCE_PATTERN_FPS,
+        _WORKER_REFERENCE_PROFILES,
+        _WORKER_CHEMBL_SCAFFOLD_THRESHOLDS,
+        _WORKER_EXPERT_FPS,
+    )
 
 
 def score_rows(
     rows: list[dict[str, object]],
     reference_fps: list[object],
     reference_pattern_fps: list[object],
+    reference_profiles: list[dict[str, object]],
+    chembl_scaffold_thresholds: tuple[float, ...],
     expert_fps: list[object],
     workers: int,
 ) -> list[dict[str, object]]:
     if workers <= 1 or len(rows) < 2:
-        return [score_candidate(row, reference_fps, reference_pattern_fps, expert_fps) for row in rows]
+        return [score_candidate(row, reference_fps, reference_pattern_fps, reference_profiles, chembl_scaffold_thresholds, expert_fps) for row in rows]
     worker_count = max(1, min(workers, len(rows)))
     chunksize = max(1, len(rows) // (worker_count * 4))
     try:
         with ProcessPoolExecutor(
             max_workers=worker_count,
             initializer=init_score_worker,
-            initargs=(reference_fps, reference_pattern_fps, expert_fps),
+            initargs=(reference_fps, reference_pattern_fps, reference_profiles, chembl_scaffold_thresholds, expert_fps),
         ) as pool:
             return list(pool.map(score_candidate_worker, rows, chunksize=chunksize))
     except Exception as exc:
         print(f"[refine] parallel scoring failed; falling back to serial scoring: {exc}", flush=True)
-        return [score_candidate(row, reference_fps, reference_pattern_fps, expert_fps) for row in rows]
+        return [score_candidate(row, reference_fps, reference_pattern_fps, reference_profiles, chembl_scaffold_thresholds, expert_fps) for row in rows]
 
 
 def refinement_meta_for_row(row: dict[str, object]) -> dict[str, str]:
     return {
         "refinement_source": "druglike-pocket-refiner",
         "druglike_refinement_score": str(row.get("druglike_refinement_score", "")),
-        "refinement_qed": str(row.get("qed", "")),
-        "synthetic_score_proxy": str(row.get("synthetic_score_proxy", "")),
-        "property_window_score": str(row.get("property_window_score", "")),
-        "qed_component_score": str(row.get("qed_component_score", "")),
-        "synthetic_component_score": str(row.get("synthetic_component_score", "")),
-        "property_component_score": str(row.get("property_component_score", "")),
-        "parent_similarity_score": str(row.get("parent_similarity_score", "")),
-        "expert_similarity_score": str(row.get("expert_similarity_score", "")),
-        "reference_similarity_score": str(row.get("reference_similarity_score", "")),
-        "reference_partial_similarity_score": str(row.get("reference_partial_similarity_score", "")),
-        "qve_component_score": str(row.get("qve_component_score", "")),
-        "inherited_structure_score": str(row.get("inherited_structure_score", "")),
-        "structural_alert_penalty_score": str(row.get("structural_alert_penalty_score", "")),
-        "refinement_parent_similarity": str(row.get("parent_similarity", "")),
-        "refinement_expert_similarity": str(row.get("expert_similarity", "")),
-        "kinase_reference_similarity": str(row.get("kinase_reference_similarity", "")),
-        "kinase_reference_partial_similarity": str(row.get("kinase_reference_partial_similarity", "")),
-        "qve_delta": str(row.get("qve_delta", "")),
-        "structural_alert_penalty": str(row.get("structural_alert_penalty", "")),
-        "refinement_generation": str(row.get("generation", "")),
     }
 
 
@@ -941,27 +1183,44 @@ def dock_refined_candidates(rows: list[dict[str, object]], args: argparse.Namesp
     jobs: list[dict[str, object]] = []
     new_rows: list[dict[str, str | int | float]] = []
     updated_existing = 0
-    for index, row in enumerate(rows[: args.dock_top_candidates], start=1):
+    scanned = 0
+    existing_success_skipped = 0
+    existing_failed_retry = 0
+    duplicate_seen_skipped = 0
+    invalid_smiles_skipped = 0
+    for index, row in enumerate(rows, start=1):
+        if len(jobs) >= args.dock_top_candidates:
+            break
+        scanned += 1
         smiles = str(row.get("candidate_smiles", ""))
         if not smiles:
+            invalid_smiles_skipped += 1
             continue
         ids = du.smiles_identity(smiles, smiles)
         if not ids.get("canonical_smiles"):
+            invalid_smiles_skipped += 1
             continue
         meta = refinement_meta_for_row(row)
         existing = du.find_existing(existing_rows, ids)
-        if existing and not args.redock_refined:
+        if existing and not args.redock_refined and du.row_has_successful_dock(existing):
             du.merge_refinement_meta(existing, meta)
             if not existing.get("nickname"):
                 existing["nickname"] = f"REFINE_{index:04d}"
             updated_existing += 1
+            existing_success_skipped += 1
             print(f"[dock-refine] existing seq_id={existing.get('seq_id')} updated_refinement_score={row.get('druglike_refinement_score', '')}", flush=True)
             continue
-        if any(du.same_molecule(ids, old) for old in seen):
+        retry_existing = bool(existing and not args.redock_refined and not du.row_has_successful_dock(existing))
+        if not retry_existing and any(du.same_molecule(ids, old) for old in seen):
+            duplicate_seen_skipped += 1
             continue
-        seq = du.seq_id(seq_number)
-        seq_number += 1
-        seen.append(ids)
+        seq = str(existing.get("seq_id")) if retry_existing and existing else du.seq_id(seq_number)
+        if not retry_existing:
+            seq_number += 1
+            seen.append(ids)
+        else:
+            existing_failed_retry += 1
+            print(f"[dock-refine] existing_failed seq_id={seq}; redocking_existing_row=true", flush=True)
         jobs.append(
             {
                 "seq": seq,
@@ -981,10 +1240,13 @@ def dock_refined_candidates(rows: list[dict[str, object]], args: argparse.Namesp
                 "refinement_meta": meta,
                 "seed": args.seed + index,
                 "cluster_cutoff": args.internal_cluster_rmsd_cutoff,
+                "existing_seq_id": seq if retry_existing else "",
             }
         )
     print(
-        f"[dock-refine] new_jobs={len(jobs)} existing_updates={updated_existing} "
+        f"[dock-refine] scored_rows={len(rows)} scanned={scanned} new_jobs={len(jobs)} existing_updates={updated_existing} "
+        f"existing_success_skipped={existing_success_skipped} existing_failed_retry={existing_failed_retry} "
+        f"duplicate_skipped={duplicate_seen_skipped} invalid_smiles={invalid_smiles_skipped} "
         f"dock_workers={args.dock_workers} vina_cpu={box.cpu}",
         flush=True,
     )
@@ -998,7 +1260,12 @@ def dock_refined_candidates(rows: list[dict[str, object]], args: argparse.Namesp
                         f"reason={docked.get('reason', '')}",
                         flush=True,
                     )
-                    new_rows.append(docked)
+                    existing_seq_id = str(docked.get("seq_id", ""))
+                    target = next((r for r in existing_rows if r.get("seq_id") == existing_seq_id), None)
+                    if target and not args.redock_refined:
+                        du.update_existing_from_dock(target, docked)
+                    else:
+                        new_rows.append(docked)
         except Exception as exc:
             print(f"[dock-refine] parallel docking failed; falling back to serial docking: {exc}", flush=True)
             for job in jobs:
@@ -1008,7 +1275,12 @@ def dock_refined_candidates(rows: list[dict[str, object]], args: argparse.Namesp
                     f"reason={docked.get('reason', '')}",
                     flush=True,
                 )
-                new_rows.append(docked)
+                existing_seq_id = str(docked.get("seq_id", ""))
+                target = next((r for r in existing_rows if r.get("seq_id") == existing_seq_id), None)
+                if target and not args.redock_refined:
+                    du.update_existing_from_dock(target, docked)
+                else:
+                    new_rows.append(docked)
     else:
         for job in jobs:
             docked = dock_refined_worker(job)
@@ -1017,7 +1289,12 @@ def dock_refined_candidates(rows: list[dict[str, object]], args: argparse.Namesp
                 f"reason={docked.get('reason', '')}",
                 flush=True,
             )
-            new_rows.append(docked)
+            existing_seq_id = str(docked.get("seq_id", ""))
+            target = next((r for r in existing_rows if r.get("seq_id") == existing_seq_id), None)
+            if target and not args.redock_refined:
+                du.update_existing_from_dock(target, docked)
+            else:
+                new_rows.append(docked)
     du.write_csv(ledger_file, existing_rows + new_rows)
     print(f"[dock-refine] wrote {ledger_file} new_rows={len(new_rows)} total_rows={len(existing_rows) + len(new_rows)}", flush=True)
 
@@ -1033,7 +1310,7 @@ def add_docked_scores(
         docked = best.get(canonical)
         merged = dict(row)
         docked_reason = docked.get("reason", "") if docked else ""
-        if docked and not docked_reason and docked.get("affinity_kcal_mol") not in ("", None):
+        if docked and du.row_has_successful_dock(docked):
             footprint = structural_footprint_score(docked)
             affinity = clean_float(docked.get("affinity_kcal_mol"), default=0.0)
             affinity_component = clamp01(max(0.0, -affinity) / 14.0)
@@ -1080,6 +1357,51 @@ def add_docked_scores(
     return out
 
 
+def build_dock_queue(
+    filtered_rows: list[dict[str, object]],
+    all_rows: list[dict[str, object]],
+    history_rows: list[dict[str, str]],
+    dock_top_candidates: int,
+) -> list[dict[str, object]]:
+    """Prefer ranked rows, then backfill with new generated molecules so history can grow."""
+    if dock_top_candidates <= 0:
+        return []
+    successful_history: set[str] = set()
+    for history_row in history_rows:
+        if not du.row_has_successful_dock(history_row):
+            continue
+        canonical = can(history_row.get("canonical_smiles") or history_row.get("smiles") or history_row.get("input_smiles"))
+        if canonical:
+            successful_history.add(canonical)
+    queued: list[dict[str, object]] = []
+    queued_smiles: set[str] = set()
+
+    def add_row(row: dict[str, object]) -> None:
+        canonical = can(str(row.get("candidate_smiles", "")))
+        if not canonical or canonical in queued_smiles:
+            return
+        queued_smiles.add(canonical)
+        queued.append(row)
+
+    for row in filtered_rows:
+        add_row(row)
+    new_backfill = 0
+    for row in all_rows:
+        canonical = can(str(row.get("candidate_smiles", "")))
+        if not canonical or canonical in queued_smiles or canonical in successful_history:
+            continue
+        add_row(row)
+        new_backfill += 1
+        if new_backfill >= dock_top_candidates:
+            break
+    print(
+        f"[dock-refine] dock_queue_rows={len(queued)} filtered_rows={len(filtered_rows)} "
+        f"new_backfill_rows={new_backfill} dock_top_candidates={dock_top_candidates}",
+        flush=True,
+    )
+    return queued
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--history-dir", type=Path, default=du.DEFAULT_LEDGER_DIR)
@@ -1090,8 +1412,16 @@ def main() -> None:
     parser.add_argument("--include-history-anchors", action="store_true", help="Also use top historical anchors when expert SMILES are provided")
     parser.add_argument("--max-rounds", "--max-iterations", "--rounds", dest="max_rounds", type=int, default=10, help="Maximum refinement generations before stopping")
     parser.add_argument("--target-refinement-score", type=float, default=5.0, help="Stop early once any candidate reaches this 0-10 score")
+    parser.add_argument(
+        "--min-generated-before-target-stop",
+        type=int,
+        default=0,
+        help="Minimum newly generated candidates required before --target-refinement-score can stop refinement; 0 means max(batch-size, dock-top-candidates)",
+    )
     parser.add_argument("--batch-size", "--max-candidates", dest="batch_size", type=int, default=300, help="Maximum new candidates generated per refinement round")
+    parser.add_argument("--beam-size", type=int, default=1, help="Number of best candidates kept as parents for the next refinement round; default 1 follows the single best lineage")
     parser.add_argument("--progress-interval", type=int, default=25, help="Print refinement progress every N generated candidates within a round; 0 disables intra-round progress")
+    parser.add_argument("--allow-history-duplicates", action="store_true", help="Allow generated candidates that already exist in dock_history.csv; default excludes them so docking expands history")
     parser.add_argument("--top-to-dock", type=int, default=50)
     parser.add_argument("--workers", type=int, default=default_refinement_workers(), help="Parallel workers for candidate scoring")
     parser.add_argument("--min-qed", type=float, default=0.0)
@@ -1114,9 +1444,13 @@ def main() -> None:
     parser.add_argument("--no-scaffold-edits", dest="scaffold_edits", action="store_false", help="Disable bioisostere, ring/side-chain replacement, and cyclization edits")
     parser.add_argument("--allow-qve-loss", dest="require_qve_gain", action="store_false", help="Allow scaffold edits even when QED/window/synthetic proxy does not improve")
     parser.add_argument("--min-reference-similarity", type=float, default=0.0, help="Optional hard filter against kinase reference SMILES fingerprints")
+    parser.add_argument("--chembl-scaffold-thresholds", default="0.4,0.3,0.2", help="Descending Murcko/MCS scaffold fraction thresholds to try against ChEMBL references")
+    parser.add_argument("--min-chembl-scaffold-fraction", type=float, default=0.2, help="Minimum ChEMBL Murcko/MCS scaffold fraction when reference SMILES are supplied")
     parser.add_argument("--seed", type=int, default=42)
     parser.set_defaults(scaffold_edits=True, require_qve_gain=True)
     args = parser.parse_args()
+    if args.min_generated_before_target_stop <= 0:
+        args.min_generated_before_target_stop = max(args.batch_size, args.dock_top_candidates)
 
     args.history_dir = du.normalize_ledger_dir(args.history_dir)
     history_file = args.history_dir / du.LEDGER_FILENAME
@@ -1172,22 +1506,38 @@ def main() -> None:
 
     reference_fps = load_reference_fps(args.reference_smiles_csv, max_rows=5000)
     reference_pattern_fps = load_reference_pattern_fps(args.reference_smiles_csv, max_rows=5000)
+    reference_profiles = load_reference_profiles(args.reference_smiles_csv, max_rows=5000)
+    chembl_scaffold_thresholds = parse_thresholds(args.chembl_scaffold_thresholds)
+    if reference_profiles:
+        print(
+            f"loaded ChEMBL scaffold references={len(reference_profiles)} thresholds={','.join(str(x) for x in chembl_scaffold_thresholds)}",
+            flush=True,
+        )
     expert_fps = [fingerprint(str(parent["canonical_smiles"])) for parent in expert_parents]
     expert_fps = [fp for fp in expert_fps if fp is not None]
     def live_score(row: dict[str, object]) -> dict[str, object]:
-        return score_candidate(row, reference_fps, reference_pattern_fps, expert_fps)
+        return score_candidate(row, reference_fps, reference_pattern_fps, reference_profiles, chembl_scaffold_thresholds, expert_fps)
+    history_exclude_smiles: set[str] = set()
+    if not args.allow_history_duplicates:
+        for row in history_rows:
+            canonical = can(row.get("canonical_smiles") or row.get("smiles") or row.get("input_smiles"))
+            if canonical:
+                history_exclude_smiles.add(canonical)
 
     generated = generate_candidates(
         parents,
         args.max_rounds,
         args.batch_size,
+        args.beam_size,
         args.seed,
         args.allow_add,
         args.scaffold_edits,
         args.require_qve_gain,
         score_fn=live_score,
         target_score=args.target_refinement_score,
+        min_generated_before_target_stop=args.min_generated_before_target_stop,
         progress_interval=args.progress_interval,
+        exclude_smiles=history_exclude_smiles,
     )
     seed_rows = []
     for parent in expert_parents:
@@ -1204,22 +1554,33 @@ def main() -> None:
                 "generation": 0,
             }
         )
-    scored = score_rows(generated + seed_rows, reference_fps, reference_pattern_fps, expert_fps, args.workers)
+    all_scored = score_rows(generated + seed_rows, reference_fps, reference_pattern_fps, reference_profiles, chembl_scaffold_thresholds, expert_fps, args.workers)
+    prefilter_count = len(all_scored)
     scored = [
-        row for row in scored
+        row for row in all_scored
         if float(row.get("qed", 0)) >= args.min_qed
         and float(row.get("mw", math.inf)) <= args.max_mw
         and int(row.get("rot_bonds", 99)) <= args.max_rot_bonds
         and (not reference_fps or float(row.get("kinase_reference_similarity", 0)) >= args.min_reference_similarity)
+        and (not reference_profiles or float(row.get("chembl_scaffold_fraction", 0)) >= args.min_chembl_scaffold_fraction)
     ]
     scored.sort(key=lambda row: float(row["druglike_refinement_score"]), reverse=True)
+    all_scored.sort(key=lambda row: float(row["druglike_refinement_score"]), reverse=True)
+    print(
+        f"[refine] scored_prefilter={prefilter_count} scored_after_filters={len(scored)} "
+        f"history_duplicates_allowed={args.allow_history_duplicates}",
+        flush=True,
+    )
     fields = [
         "druglike_refinement_score", "qed", "synthetic_score_proxy", "property_window_score",
         "qed_component_score", "synthetic_component_score", "property_component_score",
         "parent_similarity_score", "expert_similarity_score", "reference_similarity_score",
-        "reference_partial_similarity_score", "qve_component_score", "inherited_structure_score",
+        "reference_partial_similarity_score", "chembl_scaffold_component_score", "qve_component_score", "inherited_structure_score",
         "structural_alert_penalty_score",
         "parent_similarity", "expert_similarity", "kinase_reference_similarity", "kinase_reference_partial_similarity",
+        "chembl_scaffold_fraction", "chembl_scaffold_threshold_met", "chembl_scaffold_mcs_atoms",
+        "chembl_scaffold_mcs_bonds", "chembl_scaffold_tanimoto", "chembl_reference_id",
+        "chembl_reference_scaffold_smiles", "candidate_murcko_scaffold",
         "parent_anchor_score", "parent_structural_footprint_score", "inherited_structure_raw",
         "qve_delta", "structural_alert_penalty", "generation", "source_parent", "edit_label", "candidate_smiles", "parent_smiles", "ancestor_smiles",
         "mw", "logp", "hbd", "hba", "tpsa", "rot_bonds", "heavy_atoms", "aromatic_rings", "formal_charge",
@@ -1230,7 +1591,8 @@ def main() -> None:
         for i, row in enumerate(scored[: args.top_to_dock], start=1):
             handle.write(f"{row['candidate_smiles']} DRUGLIKE_{i:04d}\n")
     if args.dock_top_candidates > 0:
-        dock_refined_candidates(scored, args)
+        dock_queue = build_dock_queue(scored, all_scored, history_rows, args.dock_top_candidates)
+        dock_refined_candidates(dock_queue, args)
         refreshed_history_rows = du.read_csv(history_file)
         enrich_history_with_pose_context(refreshed_history_rows, args.receptor)
         docked_scored = add_docked_scores(scored, refreshed_history_rows)
@@ -1246,6 +1608,7 @@ def main() -> None:
         write_csv(outdir / "druglike_refinement_docked_ranked.csv", docked_scored[: args.top_to_dock], docked_fields)
     print(
         f"parents={len(parents)} max_rounds={args.max_rounds} batch_size={args.batch_size} "
+        f"beam_size={args.beam_size} "
         f"target_score={args.target_refinement_score} generated={len(generated)} kept={len(scored)} "
         f"completed_rounds={max([int(row.get('generation', 0)) for row in generated] or [0])} "
         f"wrote={outdir / 'druglike_refinement_ranked.csv'}",

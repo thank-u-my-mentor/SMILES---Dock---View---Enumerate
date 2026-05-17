@@ -50,39 +50,12 @@ LEDGER_FIELDS = [
     "seq_id",
     "timestamp",
     "nickname",
-    "ancestor_smiles",
     "parent_smiles",
-    "edit_label",
-    "refinement_source",
     "druglike_refinement_score",
-    "refinement_qed",
-    "synthetic_score_proxy",
-    "property_window_score",
-    "qed_component_score",
-    "synthetic_component_score",
-    "property_component_score",
-    "parent_similarity_score",
-    "expert_similarity_score",
-    "reference_similarity_score",
-    "reference_partial_similarity_score",
-    "qve_component_score",
-    "inherited_structure_score",
-    "structural_alert_penalty_score",
-    "refinement_parent_similarity",
-    "refinement_expert_similarity",
-    "kinase_reference_similarity",
-    "kinase_reference_partial_similarity",
-    "qve_delta",
-    "structural_alert_penalty",
-    "refinement_generation",
     "input_smiles",
-    "smiles",
     "canonical_smiles",
     "affinity_kcal_mol",
     "official_binding_score",
-    "binding_score_source",
-    "mode_count",
-    "best_affinity_mode",
     "inner_rmsd",
     "inner_cluster_fraction",
     "whole_rmsd",
@@ -108,28 +81,7 @@ LEDGER_FIELDS = [
 ]
 
 REFINEMENT_LEDGER_FIELDS = [
-    "refinement_source",
     "druglike_refinement_score",
-    "refinement_qed",
-    "synthetic_score_proxy",
-    "property_window_score",
-    "qed_component_score",
-    "synthetic_component_score",
-    "property_component_score",
-    "parent_similarity_score",
-    "expert_similarity_score",
-    "reference_similarity_score",
-    "reference_partial_similarity_score",
-    "qve_component_score",
-    "inherited_structure_score",
-    "structural_alert_penalty_score",
-    "refinement_parent_similarity",
-    "refinement_expert_similarity",
-    "kinase_reference_similarity",
-    "kinase_reference_partial_similarity",
-    "qve_delta",
-    "structural_alert_penalty",
-    "refinement_generation",
 ]
 
 
@@ -367,12 +319,23 @@ def load_saved_config(ledger_dir: Path) -> dict[str, str | int | float]:
         return {}
 
 
+def normalize_executable_config_value(value: str | None, filename: str) -> str | None:
+    if value in (None, ""):
+        return value
+    path = Path(str(value)).expanduser()
+    if path.is_dir():
+        candidate = path / filename
+        if candidate.exists():
+            return str(candidate)
+    return str(value)
+
+
 def save_config(ledger_dir: Path, args: argparse.Namespace) -> None:
     fields = {
         "receptor": path_text(str(args.receptor) if args.receptor else ""),
         "config": path_text(str(args.config) if args.config else ""),
-        "vina": args.vina,
-        "meeko": args.meeko,
+        "vina": normalize_executable_config_value(args.vina, "vina"),
+        "meeko": normalize_executable_config_value(args.meeko, "mk_prepare_ligand.py"),
         "obabel": args.obabel,
         "cpu": args.cpu,
         "exhaustiveness": args.exhaustiveness,
@@ -392,6 +355,11 @@ def arg_or_config(args: argparse.Namespace, name: str, default: str | int | None
 
 
 def resolve_executable(value: str, ledger_dir: Path, filename: str) -> str:
+    expanded = Path(str(value)).expanduser()
+    if expanded.is_dir():
+        nested = expanded / filename
+        if nested.exists():
+            return str(nested)
     if command_exists(value):
         return value
     local = ledger_dir.parent / "vina_bin" / filename
@@ -449,7 +417,8 @@ def run(cmd: list[str]) -> tuple[int, str]:
 
 
 def command_exists(command: str) -> bool:
-    return Path(command).exists() or shutil.which(command) is not None
+    path = Path(command).expanduser()
+    return (path.exists() and not path.is_dir()) or shutil.which(command) is not None
 
 
 def embed_sdf(smiles: str, name: str, sdf_path: Path, seed: int) -> None:
@@ -869,6 +838,30 @@ def find_existing(rows: list[dict[str, str]], ids: dict[str, str]) -> dict[str, 
     return None
 
 
+def row_has_successful_dock(row: dict[str, str]) -> bool:
+    try:
+        value = row.get("affinity_kcal_mol", "")
+        if value in ("", None):
+            return False
+        return math.isfinite(float(value))
+    except Exception:
+        return False
+
+
+def update_existing_from_dock(existing: dict[str, str], docked: dict[str, str | int | float]) -> None:
+    keep_seq = existing.get("seq_id", "")
+    keep_timestamp = existing.get("timestamp", "")
+    for field in LEDGER_FIELDS:
+        if field in ("seq_id", "timestamp"):
+            continue
+        value = docked.get(field, "")
+        existing[field] = str(value) if value is not None else ""
+    if keep_seq:
+        existing["seq_id"] = keep_seq
+    if keep_timestamp:
+        existing["timestamp"] = keep_timestamp
+
+
 def dock_one(
     *,
     seq: str,
@@ -975,7 +968,7 @@ def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
     ids = smiles_identity(input_smiles, input_smiles)
     existing = find_existing(existing_rows, ids)
     new_rows: list[dict[str, str | int | float]] = []
-    if existing and not args.redock_existing:
+    if existing and not args.redock_existing and row_has_successful_dock(existing):
         print(f"input_exists=true seq_id={existing.get('seq_id')}", flush=True)
         if input_nickname:
             existing["nickname"] = input_nickname
@@ -988,8 +981,12 @@ def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
         merge_refinement_meta(existing, refinement_meta)
         active = [existing]
     else:
-        seq = seq_id(seq_number)
-        seq_number += 1
+        retry_existing = bool(existing and not args.redock_existing and not row_has_successful_dock(existing))
+        seq = str(existing.get("seq_id")) if retry_existing and existing else seq_id(seq_number)
+        if not retry_existing:
+            seq_number += 1
+        if retry_existing:
+            print(f"input_exists_but_failed=true seq_id={seq}; redocking_existing_row=true", flush=True)
         row = dock_one(
             seq=seq,
             smiles=ids.get("canonical_smiles") or input_smiles,
@@ -1010,7 +1007,10 @@ def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
         )
         merge_refinement_meta(row, refinement_meta)
         print(f"[dock] {seq} ancestor affinity={row.get('affinity_kcal_mol')} reason={row.get('reason', '')}", flush=True)
-        new_rows.append(row)
+        if retry_existing and existing:
+            update_existing_from_dock(existing, row)
+        else:
+            new_rows.append(row)
         active = [{key: str(value) for key, value in row.items()}]
 
     seen = [row_identity(row) for row in existing_rows]
@@ -1059,7 +1059,7 @@ def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
                 )
                 new_rows.append(row)
                 seen.append(row_identity({key: str(value) for key, value in row.items()}))
-                if row.get("reason", "") == "":
+                if row_has_successful_dock({key: str(value) for key, value in row.items()}):
                     next_active.append({key: str(value) for key, value in row.items()})
                 docked += 1
                 if docked >= args.batch_size:

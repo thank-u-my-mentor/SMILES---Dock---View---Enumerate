@@ -115,10 +115,16 @@ python /path/to/smiles-to-vina-docking/scripts/dock_smiles.py \
 If the molecule already exists, the tool reports the existing `seq_id` and does not redock by default. Use `--redock-existing` only when the user truly wants another docking event for the same molecule.
 `--nickname` is optional and stored as the user-facing label for that row when provided.
 
+If the existing row has no affinity or has a failure `reason`, the tool treats it as an
+incomplete docking record and retries that same `seq_id` instead of silently skipping it.
+This protects rows created by an earlier bad Vina path or failed ligand preparation.
+
 If many rows suddenly show `vina_executable_not_found` or `vina_failed_or_no_affinity`
 with logs like `No such file or directory: 'vina'`, pass the full Vina path once again,
 for example `--vina ~/vina_task2/vina_bin/vina`. The tool also tries the common
 `<history parent>/vina_bin/vina` location when an old config only contains bare `vina`.
+If `--vina` is accidentally passed as the directory `~/vina_task2/vina_bin`, the code now
+normalizes it to `~/vina_task2/vina_bin/vina` before saving `history_config.json`.
 
 ## Generating Analogs
 
@@ -170,11 +176,9 @@ For drug-likeness rescue work, tighten these values, for example `--min-analog-q
 
 Recommended columns in the current minimal ledger:
 
-`dock_history.csv` may also contain optional `druglike-pocket-refiner` columns such as
-`refinement_source`, `druglike_refinement_score`, `refinement_qed`,
-`qed_component_score`, `reference_similarity_score`, `reference_partial_similarity_score`,
-`qve_delta`, and `refinement_generation`. These fields are blank for ordinary docking rows
-and populated when refined candidates are docked or matched back into the history.
+`dock_history.csv` may also contain two optional `druglike-pocket-refiner` columns:
+`refinement_source` and `druglike_refinement_score`. Keep detailed refiner component
+scores in `druglike_refinement_ranked.csv`, not in the persistent docking history.
 
 - `seq_id`: simple sequence id such as `S000001`.
 - `timestamp`: when the row was created.
