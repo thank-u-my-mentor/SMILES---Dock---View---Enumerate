@@ -498,6 +498,30 @@ def molecule_props(smiles: str) -> dict[str, float | int | str]:
     }
 
 
+def smiles_sanity(smiles: str) -> dict[str, str]:
+    mol = mol_from_smiles(smiles)
+    if mol is None:
+        return {"smiles_sanity_status": "reject", "smiles_sanity_reasons": "rdkit_parse_failed"}
+    reasons: list[str] = []
+    if len(Chem.GetMolFrags(mol)) != 1:
+        reasons.append("multiple_fragments")
+    if any(atom.GetNumRadicalElectrons() for atom in mol.GetAtoms()):
+        reasons.append("radical_atoms")
+    if any(abs(atom.GetFormalCharge()) > 1 for atom in mol.GetAtoms()):
+        reasons.append("large_atom_formal_charge")
+    for bond in mol.GetBonds():
+        a = bond.GetBeginAtom()
+        b = bond.GetEndAtom()
+        if bond.IsInRing() and not bond.GetIsAromatic() and a.GetIsAromatic() and b.GetIsAromatic():
+            reasons.append("nonaromatic_ring_bond_between_aromatic_atoms")
+            break
+    rings = mol.GetRingInfo().AtomRings()
+    if rings and max(len(ring) for ring in rings) > 8:
+        reasons.append("large_ring_gt8")
+    status = "reject" if reasons else "ok"
+    return {"smiles_sanity_status": status, "smiles_sanity_reasons": ";".join(reasons)}
+
+
 def load_reference_scaffold_fps(path: Path | None, max_rows: int) -> list[object]:
     if path is None or not path.expanduser().exists():
         return []
@@ -558,6 +582,7 @@ def build_rows(args: argparse.Namespace) -> list[dict[str, object]]:
         props = molecule_props(smiles)
         record: dict[str, object] = {field: row.get(field, "") for field in HISTORY_FIELDS}
         record.update(props)
+        record.update(smiles_sanity(smiles))
         record["canonical_smiles"] = smiles
         record["official_binding_score"] = safe_float(row.get("official_binding_score"))
         record["chembl_scaffold_similarity"] = max_scaffold_similarity(smiles, reference_fps)
@@ -1146,7 +1171,7 @@ def main() -> None:
     fields = [
         "seq_id", "nickname", "score_set", "official_binding_score", "predicted_binding_score",
         "prediction_residual",
-        "canonical_smiles", "murcko_scaffold", "chembl_scaffold_similarity",
+        "canonical_smiles", "smiles_sanity_status", "smiles_sanity_reasons", "murcko_scaffold", "chembl_scaffold_similarity",
         "pure_smiles_cosine1", "pure_smiles_cosine2", "pure_smiles_pc1", "pure_smiles_pc2",
         "structural_interaction_pc1", "structural_interaction_pc2",
         *STRUCTURAL_FEATURES, *POCKET_EMBEDDING_FIELDS,

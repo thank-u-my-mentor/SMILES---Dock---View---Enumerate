@@ -165,7 +165,22 @@ Important files:
 
 `frontier_score` combines novelty, distance from scored examples, predicted/known quality, drug-likeness, ChEMBL scaffold support, and available pocket-contact signal. It is a selection heuristic, not proof that a molecule will score well.
 
+When `~/vina_task2/high_low_classifier/high_low_classifier_predictions.csv` is
+available, `frontier_score` also includes `structure_high_probability`, a
+high-vs-low classifier signal from `pose-analyzer/train_high_low_classifier.py`.
+This shifts generation away from superficial descriptor optimization and toward
+molecules that structurally resemble the known high-score group.
+
 `official_score_recommendations.csv` is narrower than `frontier_seeds.csv`: it prefers molecules that already have docking/space information but do not yet have `official_binding_score`. Use it as the first place to look when choosing the next molecules to score experimentally or through the official scoring source.
+
+By default, official recommendations and refiner parent seeds require
+`structure_high_probability >= 0.60` when classifier predictions exist. Adjust
+with:
+
+```bash
+--min-structure-high-probability-for-official 0.60 \
+--min-structure-high-probability-for-refiner 0.60
+```
 
 ## Iteration Strategy
 

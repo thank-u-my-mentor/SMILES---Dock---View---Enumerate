@@ -37,6 +37,8 @@ ID_FIELDS = {
     "canonical_smiles",
     "smiles",
     "murcko_scaffold",
+    "smiles_sanity_status",
+    "smiles_sanity_reasons",
 }
 EXCLUDED_MODEL_FIELDS = {
     "official_binding_score",
@@ -248,6 +250,14 @@ def quality_score(row: dict[str, str], official_min: float, official_max: float)
     return clamp01(score)
 
 
+def passes_smiles_sanity(row: dict[str, str]) -> bool:
+    status = str(row.get("smiles_sanity_status", "") or "").strip().lower()
+    if status and status != "ok":
+        return False
+    smiles = str(row.get("canonical_smiles") or row.get("smiles") or "").strip()
+    return bool(smiles)
+
+
 def selection_origin(row: dict[str, str]) -> str:
     edit_label = str(row.get("edit_label", "") or "").lower()
     nickname = str(row.get("nickname", "") or "").lower()
@@ -262,6 +272,7 @@ def selection_reason(
     novelty: float,
     uncertainty: float,
     quality: float,
+    structure_prob: float,
     druglike: float,
     chembl: float,
     contact: float,
@@ -273,6 +284,7 @@ def selection_reason(
         f"novelty={novelty:.3f}",
         f"uncertainty={uncertainty:.3f}",
         f"quality={quality:.3f}",
+        f"structure_high_probability={structure_prob:.3f}",
         f"druglike={druglike:.3f}",
         f"chembl={chembl:.3f}",
         f"contact={contact:.3f}",
@@ -287,6 +299,36 @@ def count_successful_docked(history_csv: Path) -> int:
         return 0
     rows = read_csv(history_csv)
     return sum(1 for row in rows if is_finite_number(row.get("affinity_kcal_mol")))
+
+
+def load_classifier_scores(path: Path | None) -> dict[str, float]:
+    if path is None:
+        return {}
+    expanded = path.expanduser()
+    if not expanded.exists():
+        return {}
+    scores: dict[str, float] = {}
+    for row in read_csv(expanded):
+        prob = safe_float(row.get("prob_high_ensemble") or row.get("prob_high_morgan"))
+        if math.isnan(prob):
+            continue
+        seq_id = str(row.get("seq_id", "") or "").strip()
+        smiles = canonical_smiles(str(row.get("canonical_smiles", "") or ""))
+        if seq_id:
+            scores[f"seq:{seq_id}"] = prob
+        if smiles:
+            scores[f"smiles:{smiles}"] = prob
+    return scores
+
+
+def classifier_score_for_row(row: dict[str, str], scores: dict[str, float]) -> float:
+    seq_id = str(row.get("seq_id", "") or "").strip()
+    if seq_id and f"seq:{seq_id}" in scores:
+        return clamp01(scores[f"seq:{seq_id}"])
+    smiles = canonical_smiles(str(row.get("canonical_smiles", "") or row.get("smiles", "") or ""))
+    if smiles and f"smiles:{smiles}" in scores:
+        return clamp01(scores[f"smiles:{smiles}"])
+    return 0.0
 
 
 def adaptive_weights(iteration: int, docked_count: int, args: argparse.Namespace) -> dict[str, float]:
@@ -339,6 +381,7 @@ def build_frontier(args: argparse.Namespace) -> None:
     rows = read_csv(feature_matrix)
     if not rows:
         raise SystemExit(f"No rows found in {feature_matrix}")
+    classifier_scores = load_classifier_scores(getattr(args, "classifier_predictions", None))
     fields = numeric_feature_fields(rows)
     vectors = scaled_vectors(rows, fields)
     metric = getattr(args, "distance_metric", "cosine")
@@ -357,6 +400,7 @@ def build_frontier(args: argparse.Namespace) -> None:
         novelty = robust_scale(all_novelty[i], nov_lo, nov_hi)
         uncertainty = robust_scale(scored_dists[i], sd_lo, sd_hi)
         q = quality_score(row, official_min, official_max)
+        structure_prob = classifier_score_for_row(row, classifier_scores)
         d = druglike_score(row)
         chembl = clamp01(safe_float(row.get("chembl_scaffold_similarity")))
         contact = clamp01(safe_float(row.get("surface_contact_fraction_4a")))
@@ -366,6 +410,7 @@ def build_frontier(args: argparse.Namespace) -> None:
             args.weight_novelty * novelty
             + args.weight_uncertainty * uncertainty
             + args.weight_quality * q
+            + getattr(args, "weight_structure_classifier", 0.0) * structure_prob
             + args.weight_druglike * d
             + args.weight_chembl * chembl
             + args.weight_contact * contact
@@ -375,6 +420,8 @@ def build_frontier(args: argparse.Namespace) -> None:
                 "seq_id": row.get("seq_id", ""),
                 "nickname": row.get("nickname", ""),
                 "canonical_smiles": row.get("canonical_smiles", ""),
+                "smiles_sanity_status": row.get("smiles_sanity_status", ""),
+                "smiles_sanity_reasons": row.get("smiles_sanity_reasons", ""),
                 "official_binding_score": row.get("official_binding_score", ""),
                 "predicted_binding_score": row.get("predicted_binding_score", ""),
                 "affinity_kcal_mol": row.get("affinity_kcal_mol", ""),
@@ -388,11 +435,12 @@ def build_frontier(args: argparse.Namespace) -> None:
                 "novelty_score": round(novelty, 6),
                 "uncertainty_proxy": round(uncertainty, 6),
                 "quality_score": round(q, 6),
+                "structure_high_probability": round(structure_prob, 6),
                 "druglike_score": round(d, 6),
                 "contact_score": round(contact, 6),
                 "frontier_score": round(frontier, 6),
                 "selection_origin": selection_origin(row),
-                "selection_reason": selection_reason(row, novelty, uncertainty, q, d, chembl, contact, metric),
+                "selection_reason": selection_reason(row, novelty, uncertainty, q, structure_prob, d, chembl, contact, metric),
             }
         )
     ranked.sort(key=lambda item: safe_float(item.get("frontier_score")), reverse=True)
@@ -402,7 +450,13 @@ def build_frontier(args: argparse.Namespace) -> None:
     frontier_rows = ranked[: args.top_frontier_seeds]
     official_candidates = [
         row for row in ranked
-        if row.get("needs_official_binding_score") == "yes" and is_finite_number(row.get("affinity_kcal_mol"))
+        if row.get("needs_official_binding_score") == "yes"
+        and is_finite_number(row.get("affinity_kcal_mol"))
+        and passes_smiles_sanity(row)
+        and (
+            getattr(args, "min_structure_high_probability_for_official", 0.0) <= 0
+            or safe_float(row.get("structure_high_probability")) >= getattr(args, "min_structure_high_probability_for_official", 0.0)
+        )
     ]
     generated_candidates = [row for row in official_candidates if row.get("selection_origin") == "iteration_generated"]
     if len(generated_candidates) >= args.top_official_recommendations:
@@ -421,6 +475,8 @@ def build_frontier(args: argparse.Namespace) -> None:
         "seq_id",
         "nickname",
         "canonical_smiles",
+        "smiles_sanity_status",
+        "smiles_sanity_reasons",
         "needs_official_binding_score",
         "official_binding_score",
         "predicted_binding_score",
@@ -435,6 +491,7 @@ def build_frontier(args: argparse.Namespace) -> None:
         "novelty_score",
         "uncertainty_proxy",
         "quality_score",
+        "structure_high_probability",
         "druglike_score",
         "contact_score",
         "frontier_score",
@@ -649,16 +706,24 @@ class Paths:
         return self.project / "vina_bin" / "vina"
 
 
-def select_seed_smiles(frontier_csv: Path, max_count: int) -> list[str]:
+def select_seed_smiles(frontier_csv: Path, max_count: int, min_structure_probability: float = 0.0) -> list[str]:
     rows = read_csv(frontier_csv)
     smiles: list[str] = []
     seen: set[str] = set()
     for row in rows:
-        value = (row.get("canonical_smiles") or "").strip()
-        if not value or value in seen:
+        if str(row.get("smiles_sanity_status", "") or "").strip().lower() == "reject":
             continue
-        seen.add(value)
-        smiles.append(value)
+        structure_prob = safe_float(row.get("structure_high_probability"))
+        if min_structure_probability > 0 and (math.isnan(structure_prob) or structure_prob < min_structure_probability):
+            continue
+        value = (row.get("canonical_smiles") or "").strip()
+        if not value or value.startswith("--") or value in seen:
+            continue
+        canonical_value = canonical_smiles(value)
+        if not canonical_value or canonical_value in seen:
+            continue
+        seen.add(canonical_value)
+        smiles.append(canonical_value)
         if len(smiles) >= max_count:
             break
     return smiles
@@ -666,7 +731,7 @@ def select_seed_smiles(frontier_csv: Path, max_count: int) -> list[str]:
 
 def run_refiner_generation(paths: Paths, args: argparse.Namespace, iter_dir: Path) -> None:
     frontier_csv = iter_dir / "frontier_seeds.csv"
-    seed_smiles = select_seed_smiles(frontier_csv, args.frontier_seeds_to_refine)
+    seed_smiles = select_seed_smiles(frontier_csv, args.frontier_seeds_to_refine, args.min_structure_high_probability_for_refiner)
     if not seed_smiles:
         print(f"no frontier seed SMILES found in {frontier_csv}; skipping generation")
         return
@@ -859,6 +924,7 @@ def write_iteration_manifest(
             "novelty": getattr(weight_source, "weight_novelty", args.weight_novelty),
             "uncertainty": getattr(weight_source, "weight_uncertainty", args.weight_uncertainty),
             "quality": getattr(weight_source, "weight_quality", args.weight_quality),
+            "structure_classifier": getattr(weight_source, "weight_structure_classifier", args.weight_structure_classifier),
             "druglike": getattr(weight_source, "weight_druglike", args.weight_druglike),
             "chembl": getattr(weight_source, "weight_chembl", args.weight_chembl),
             "contact": getattr(weight_source, "weight_contact", args.weight_contact),
@@ -909,12 +975,15 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--top-frontier-seeds", type=int, default=30)
         p.add_argument("--top-shortlist", type=int, default=100)
         p.add_argument("--top-official-recommendations", type=int, default=3)
+        p.add_argument("--classifier-predictions", type=Path, default=DEFAULT_PROJECT / "high_low_classifier" / "high_low_classifier_predictions.csv")
+        p.add_argument("--min-structure-high-probability-for-official", type=float, default=0.60)
         p.add_argument("--neighbor-k", type=int, default=8)
         p.add_argument("--distance-metric", choices=["cosine", "euclidean"], default="cosine", help="Distance metric for high-dimensional frontier/uncertainty sampling")
         p.add_argument("--grid-bins", type=int, default=16)
         p.add_argument("--weight-novelty", type=float, default=0.28)
         p.add_argument("--weight-uncertainty", type=float, default=0.22)
         p.add_argument("--weight-quality", type=float, default=0.18)
+        p.add_argument("--weight-structure-classifier", type=float, default=0.25)
         p.add_argument("--weight-druglike", type=float, default=0.14)
         p.add_argument("--weight-chembl", type=float, default=0.10)
         p.add_argument("--weight-contact", type=float, default=0.08)
@@ -931,6 +1000,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--generate-new-smiles", action="store_true", help="After frontier selection, call druglike-pocket-refiner on frontier seeds to create new SMILES")
     run.add_argument("--dock-generated", action="store_true", help="When generating new SMILES, dock top refined candidates and write them back to dock_history.csv")
     run.add_argument("--frontier-seeds-to-refine", type=int, default=5)
+    run.add_argument("--min-structure-high-probability-for-refiner", type=float, default=0.60)
     run.add_argument("--refiner-rounds", type=int, default=2)
     run.add_argument("--refiner-batch-size", type=int, default=200)
     run.add_argument("--refiner-beam-size", type=int, default=3)
@@ -956,12 +1026,15 @@ def build_parser() -> argparse.ArgumentParser:
     frontier.add_argument("--top-frontier-seeds", type=int, default=30)
     frontier.add_argument("--top-shortlist", type=int, default=100)
     frontier.add_argument("--top-official-recommendations", type=int, default=3)
+    frontier.add_argument("--classifier-predictions", type=Path, default=DEFAULT_PROJECT / "high_low_classifier" / "high_low_classifier_predictions.csv")
+    frontier.add_argument("--min-structure-high-probability-for-official", type=float, default=0.60)
     frontier.add_argument("--neighbor-k", type=int, default=8)
     frontier.add_argument("--distance-metric", choices=["cosine", "euclidean"], default="cosine")
     frontier.add_argument("--grid-bins", type=int, default=16)
     frontier.add_argument("--weight-novelty", type=float, default=0.28)
     frontier.add_argument("--weight-uncertainty", type=float, default=0.22)
     frontier.add_argument("--weight-quality", type=float, default=0.18)
+    frontier.add_argument("--weight-structure-classifier", type=float, default=0.25)
     frontier.add_argument("--weight-druglike", type=float, default=0.14)
     frontier.add_argument("--weight-chembl", type=float, default=0.10)
     frontier.add_argument("--weight-contact", type=float, default=0.08)

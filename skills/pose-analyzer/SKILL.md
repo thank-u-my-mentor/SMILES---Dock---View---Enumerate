@@ -167,10 +167,25 @@ python /path/to/pose-analyzer/scripts/score_space_model.py \
   --history-csv ~/vina_task2/dock_history/dock_history.csv \
   --analysis-csv ~/vina_task2/dock_history/binding_score_analysis.csv \
   --reference-smiles-csv ~/vina_task2/references/chembl_kinase_smiles.csv \
+  --receptor ~/vina_task2/vina_bin/target.pdbqt \
   --outdir ~/vina_task2/score_space_model \
   --train-size 60 \
   --test-size 20
 ```
+
+Current behavior:
+
+- Pure-SMILES-space now defaults to Morgan fingerprint cosine distance followed
+  by UMAP when available, with MDS fallback. Legacy `pure_smiles_pc1/pc2`
+  columns are still written, but `pure_smiles_cosine1/2` is the preferred map.
+- Each docked ligand can also receive a lightweight S1-style local pocket
+  embedding from receptor atoms/residues within 5 A of the best Vina pose:
+  `pocket_rg_5a`, `pocket_span_5a`, `pocket_centroid_distance_5a`,
+  pocket residue physicochemical fractions, `pocket_geom_00..63`, and
+  `pocket_physchem_00..23`.
+- These 5 A pocket features are included in the Random Forest and in the
+  high-score versus low-score comparison. The 2-D map coordinates remain
+  visualization-only and are not used as model inputs.
 
 Outputs:
 
@@ -215,6 +230,36 @@ High/low group thresholds can be adjusted:
 ```bash
 --high-score-threshold 0.4 --low-score-max 0.25
 ```
+
+### High/Low Structure Classifier
+
+When the regression model is weak, use the high/low classifier instead of
+treating predicted binding score as a continuous truth. It learns the structural
+boundary between high-score molecules (`official_binding_score >= 0.4`) and
+low-score molecules (`0 <= official_binding_score <= 0.25`).
+
+```bash
+python /path/to/pose-analyzer/scripts/train_high_low_classifier.py \
+  --feature-matrix ~/vina_task2/score_space_model/binding_score_feature_matrix.csv \
+  --outdir ~/vina_task2/high_low_classifier
+```
+
+Outputs:
+
+- `high_low_classifier_predictions.csv`: every molecule with
+  `prob_high_morgan`, optional `prob_high_gnn`, `prob_high_ensemble`,
+  nearest-high and nearest-low Morgan Tanimoto.
+- `high_low_classifier_metrics.json`: cross-validation metrics for the Morgan
+  fingerprint classifier and status for the small graph-GCN baseline.
+
+This is still small-data learning. Use it to prioritize which generated/docked
+unscored molecules structurally resemble the high-score group, not as proof of
+activity.
+
+`active-learning-orchestrator` can consume this file through
+`--classifier-predictions` and defaults to requiring
+`structure_high_probability >= 0.60` for official-score recommendations and
+refiner parent seeds.
 
 This is the first lightweight step toward S1-style pocket embedding analysis:
 it compares existing pose/contact/descriptors and embedding coordinates before

@@ -88,8 +88,6 @@ def compact_row(row: dict[str, str]) -> dict[str, object]:
         "nickname": row.get("nickname", ""),
         "score_set": row.get("score_set", ""),
         "canonical_smiles": row.get("canonical_smiles", ""),
-        "smiles_sanity_status": row.get("smiles_sanity_status", ""),
-        "smiles_sanity_reasons": row.get("smiles_sanity_reasons", ""),
         "murcko_scaffold": row.get("murcko_scaffold", ""),
     }
     for field in ("selection_reason", "selection_origin"):
@@ -383,7 +381,6 @@ def build_js() -> str:
     return r"""let DATA = [];
 let METRICS = {};
 let ACTIVE = {frontier_seq_ids: [], official_score_seq_ids: [], frontier_seeds: [], official_score_recommendations: []};
-let userColorRange = {};
 let selectedId = null;
 let view = {scale: 1, dx: 0, dy: 0};
 const svg = document.getElementById("space-plot");
@@ -393,19 +390,12 @@ const tableBody = document.querySelector("#candidate-table tbody");
 
 function num(v) { return typeof v === "number" && Number.isFinite(v); }
 function fmt(v, n=3) { return num(v) ? v.toFixed(n) : ""; }
-function officialRecommendationIds() {
-  return (ACTIVE.official_score_seq_ids || []).slice(0, 3);
-}
-function officialRecommendationRows() {
-  const allowed = new Set(officialRecommendationIds());
-  return (ACTIVE.official_score_recommendations || []).filter(r => allowed.has(r.seq_id)).slice(0, 3);
-}
 function activeInfo(seqId) {
-  const official = officialRecommendationRows().find(r => r.seq_id === seqId);
+  const official = (ACTIVE.official_score_recommendations || []).find(r => r.seq_id === seqId);
   const frontier = (ACTIVE.frontier_seeds || []).find(r => r.seq_id === seqId);
   return official || frontier || null;
 }
-function isOfficialRecommendation(seqId) { return officialRecommendationIds().includes(seqId); }
+function isOfficialRecommendation(seqId) { return (ACTIVE.official_score_seq_ids || []).includes(seqId); }
 function isFrontierSeed(seqId) { return (ACTIVE.frontier_seq_ids || []).includes(seqId); }
 
 function colorScale(value, field) {
@@ -416,11 +406,7 @@ function colorScale(value, field) {
     return "#edc948";
   }
   const range = colorRange(field);
-  const u = userColorRange[field];
-  const minV = (u && num(u.min)) ? u.min : range.min;
-  const maxV = (u && num(u.max)) ? u.max : range.max;
-  const reverse = (u && u.reverse !== undefined) ? u.reverse : (range.reverse || false);
-  return continuousColor(value, minV, maxV, reverse);
+  return continuousColor(value, range.min, range.max, range.reverse || false);
 }
 
 function colorRange(field) {
@@ -456,7 +442,7 @@ function legendFor(field) {
     return {
       title: "Molecular Weight",
       colors: ["#e15759", "#edc948", "#59a14f", "#edc948", "#e15759"],
-      labels: ["<<250", "250-300", "300-500", "500-600", ">600"],
+      labels: ["<250", "250-300", "300-500", "500-600", ">600"],
       note: "Optimal oral-drug window (300-500) is green."
     };
   }
@@ -468,17 +454,10 @@ function legendFor(field) {
     affinity_kcal_mol: "Vina affinity (kcal/mol)"
   }[field] || field;
   const range = colorRange(field);
-  const u = userColorRange[field];
-  const minV = (u && num(u.min)) ? u.min : range.min;
-  const maxV = (u && num(u.max)) ? u.max : range.max;
-  const reverse = (u && u.reverse !== undefined) ? u.reverse : (range.reverse || false);
-  const colors = reverse
-    ? ["rgb(75,192,125)", "rgb(91,155,213)", "rgb(246,189,96)", "rgb(231,76,60)"]
-    : ["rgb(231,76,60)", "rgb(246,189,96)", "rgb(91,155,213)", "rgb(75,192,125)"];
   return {
     title,
-    colors,
-    labels: [fmt(minV), "", "", fmt(maxV)],
+    colors: ["rgb(231,76,60)", "rgb(246,189,96)", "rgb(91,155,213)", "rgb(75,192,125)"],
+    labels: [fmt(range.min), "", "", fmt(range.max)],
     note: field === "predicted_binding_score"
       ? "Continuous scale from current predicted-score distribution; low R^2 means diagnostic only."
       : "Continuous scale from current data range; gray means missing value."
@@ -493,30 +472,6 @@ function drawLegend() {
     <div class="legend-bar">${legend.colors.map(color => `<span class="legend-stop" style="background:${color}"></span>`).join("")}</div>
     <div class="legend-labels">${legend.labels.map(label => `<span>${label}</span>`).join("")}</div>
     <div class="subtle">${legend.note}</div>`;
-}
-
-function syncColorControls() {
-  const field = document.getElementById("color-select").value;
-  const range = colorRange(field);
-  const u = userColorRange[field] || {};
-  const minInput = document.getElementById("color-min");
-  const maxInput = document.getElementById("color-max");
-  const reverseInput = document.getElementById("color-reverse");
-  minInput.value = num(u.min) ? u.min : range.min;
-  maxInput.value = num(u.max) ? u.max : range.max;
-  reverseInput.checked = u.reverse !== undefined ? !!u.reverse : !!range.reverse;
-}
-
-function updateColorOverride() {
-  const field = document.getElementById("color-select").value;
-  const minV = Number(document.getElementById("color-min").value);
-  const maxV = Number(document.getElementById("color-max").value);
-  userColorRange[field] = {
-    min: Number.isFinite(minV) ? minV : undefined,
-    max: Number.isFinite(maxV) ? maxV : undefined,
-    reverse: document.getElementById("color-reverse").checked,
-  };
-  draw();
 }
 
 function currentRows() {
@@ -675,7 +630,6 @@ function selectRow(seqId) {
     "pocket_charged_fraction_5a", "pocket_aromatic_fraction_5a",
     "active_learning_rank", "frontier_score", "novelty_score", "uncertainty_proxy",
     "selection_origin", "selection_reason",
-    "smiles_sanity_status", "smiles_sanity_reasons",
     "pure_smiles_cosine1", "pure_smiles_cosine2", "pure_smiles_pc1", "pure_smiles_pc2", "structural_interaction_pc1", "structural_interaction_pc2",
     "murcko_scaffold", "canonical_smiles"
   ];
@@ -728,18 +682,9 @@ window.addEventListener("mousemove", ev => {
   draw();
 });
 
-for (const id of ["space-select", "search-box", "scored-only"]) {
+for (const id of ["space-select", "color-select", "search-box", "scored-only"]) {
   document.getElementById(id).addEventListener("input", draw);
 }
-document.getElementById("color-select").addEventListener("input", () => { syncColorControls(); draw(); });
-for (const id of ["color-min", "color-max", "color-reverse"]) {
-  document.getElementById(id).addEventListener("input", updateColorOverride);
-}
-document.getElementById("reset-color").addEventListener("click", () => {
-  delete userColorRange[document.getElementById("color-select").value];
-  syncColorControls();
-  draw();
-});
 document.getElementById("reset-view").addEventListener("click", () => { view = {scale:1, dx:0, dy:0}; draw(); });
 
 Promise.all([
@@ -749,32 +694,7 @@ Promise.all([
 ]).then(([data, metrics, active]) => {
   DATA = data;
   METRICS = metrics || {};
-  ACTIVE = active || {frontier_seq_ids: [], official_score_seq_ids: [], frontier_seeds: [], official_score_recommendations: []};
-  ACTIVE.official_score_seq_ids = (ACTIVE.official_score_seq_ids && ACTIVE.official_score_seq_ids.length)
-    ? ACTIVE.official_score_seq_ids.slice(0, 3)
-    : ["__none__"];
-  
-  // 限制 official recommendations 最多 3 个（按 official binding score 降序，优先保留有 score 的）
-  if (ACTIVE.official_score_seq_ids && ACTIVE.official_score_seq_ids.length) {
-    const mapped = ACTIVE.official_score_seq_ids.map(id => DATA.find(r => r.seq_id === id)).filter(Boolean);
-    const scored = mapped.filter(r => num(r.official_binding_score)).sort((a, b) => b.official_binding_score - a.official_binding_score);
-    const unscored = mapped.filter(r => !num(r.official_binding_score));
-    ACTIVE.official_score_seq_ids = scored.slice(0, 3).concat(unscored).slice(0, 3).map(r => r.seq_id);
-  } else {
-    // 若外部未提供 recommendations，自动取 DATA 中 official score 最高的 3 个
-    const scored = DATA.filter(r => num(r.official_binding_score)).sort((a, b) => b.official_binding_score - a.official_binding_score);
-    ACTIVE.official_score_seq_ids = scored.slice(0, 3).map(r => r.seq_id);
-  }
-  // 同步 recommendations 对象数组
-  if (ACTIVE.official_score_recommendations) {
-    ACTIVE.official_score_recommendations = ACTIVE.official_score_recommendations.filter(r => ACTIVE.official_score_seq_ids.includes(r.seq_id));
-  }
-  
-  ACTIVE.official_score_seq_ids = (ACTIVE.official_score_seq_ids || []).filter(id => id !== "__none__").slice(0, 3);
-  ACTIVE.official_score_recommendations = (ACTIVE.official_score_recommendations || [])
-    .filter(r => ACTIVE.official_score_seq_ids.includes(r.seq_id))
-    .slice(0, 3);
-  syncColorControls();
+  ACTIVE = active || ACTIVE;
   renderDiagnostics();
   draw();
 });
