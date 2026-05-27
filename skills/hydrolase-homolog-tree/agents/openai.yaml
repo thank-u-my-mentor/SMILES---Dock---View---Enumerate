@@ -1,0 +1,7 @@
+interface:
+  display_name: "Hydrolase Homolog Tree"
+  short_description: "HMMER-to-tree hydrolase workflow."
+  default_prompt: "Use $hydrolase-homolog-tree to build a homolog SSN and annotated phylogenetic tree from my curated seed FASTA."
+
+policy:
+  allow_implicit_invocation: true
