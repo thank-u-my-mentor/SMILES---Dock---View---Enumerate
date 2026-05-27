@@ -19,6 +19,24 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote_plus
 
 
+CONTEXT_FIELDS = [
+    "enzyme_name",
+    "enzyme_name_or_target",
+    "title",
+    "abstract",
+    "evidence_summary",
+    "metadata_keywords",
+    "enzyme_family",
+    "flavin_cofactor",
+    "catalyst_or_photosensitizer",
+    "cofactor_or_photosensitizer",
+    "mechanistic_evidence",
+    "structure_similarity_hint",
+    "search_track",
+    "paper_domain",
+    "reaction_type",
+]
+
 GENERIC_NAME_PATTERNS = [
     r"\benzymes?\b",
     r"\bfamily members?\b",
@@ -52,10 +70,10 @@ REVIEW_HINTS = [
 ORGANISM_ALIASES = {
     "CvFAP": "Chlorella variabilis",
     "Chlorella variabilis FAP": "Chlorella variabilis",
-    "GluER": "Gluconobacter",
+    "GluER": "Gluconobacter oxydans",
     "GsOYE": "Galdieria sulphuraria",
-    "OYE1": "Saccharomyces pastorianus",
     "PaDADH": "Pseudomonas aeruginosa",
+    "PfBAL": "Pseudomonas fluorescens",
     "Pseudomonas aeruginosa D-arginine dehydrogenase": "Pseudomonas aeruginosa",
     "avenolide biosynthetic flavoenzyme": "Streptomyces avermitilis",
 }
@@ -64,16 +82,21 @@ KNOWN_ORGANISM_NAMES = [
     "Bacillus amyloliquefaciens",
     "Enterobacter cloacae",
     "Galdieria sulphuraria",
+    "Gluconobacter oxydans",
     "Chlorella variabilis",
     "Gluconobacter",
     "Saccharomyces pastorianus",
+    "Saccharomyces cerevisiae",
     "Nicotiana tabacum",
     "Escherichia coli",
     "Pseudomonas aeruginosa",
+    "Pseudomonas fluorescens",
     "Streptomyces avermitilis",
 ]
 
 NAME_PATTERNS = [
+    r"\bPfBAL(?:-[A-Z0-9]+)*\b",
+    r"\bbenzaldehyde lyase\b",
     r"\b[A-Z][a-z]{1,4}ER(?:-[A-Z0-9]+)*\b",
     r"\b[A-Z][a-z]OYE\d*(?:-[A-Z0-9]+)*\b",
     r"\bOYE\d+(?:-[A-Z0-9]+)*\b",
@@ -88,6 +111,77 @@ NAME_PATTERNS = [
 ]
 
 MUTATION_RE = re.compile(r"\b[A-Z][0-9]{1,4}[A-Z]\b")
+EC_RE = re.compile(r"\bEC\s*(?:number|no\.?)?\s*[:#]?\s*(\d+\.\d+\.\d+\.(?:\d+|-))\b", re.I)
+FALSE_PDB_IDS = {"3CL2", "6H2O"}
+
+KNOWN_PAPER_OVERRIDES = {
+    "10.1038/s41586-023-06822-x": {
+        "resolution_status": "non_flavin_exclude",
+        "resolution_reason": "ThDP-dependent PfBAL paper; exclude from flavin-dependent FASTA seeds.",
+        "specific_enzyme_names": "PfBAL | benzaldehyde lyase",
+        "parent_enzyme_names": "benzaldehyde lyase",
+        "canonical_enzyme": "PfBAL",
+        "mutations_or_variants": "",
+        "organism_candidates": "Pseudomonas fluorescens",
+        "organism_evidence": "doi_override:benzaldehyde lyase from Pseudomonas fluorescens",
+        "enzyme_family": "ThDP-dependent lyase",
+        "enzyme_name_original": "benzaldehyde lyase from Pseudomonas fluorescens (PfBAL)",
+        "flavin_cofactor": "no flavin enzyme cofactor; ThDP enzyme plus eosin Y photocatalyst",
+        "cofactor_class": "thdp",
+        "cofactor_detail": "ThDP | eosin Y external photocatalyst",
+        "cofactor_evidence": "doi_override:user correction; article is ThDP-dependent radical acylation",
+        "flavin_dependency_status": "non_flavin_thdp",
+        "enzyme_function_class": "ThDP-dependent benzaldehyde lyase",
+        "ec_number_candidates": "",
+        "sequence_resolution_route": "exclude_non_flavin",
+        "pdb_ids": "",
+        "pdb_evidence": "",
+    },
+    "10.1038/s41929-023-01065-5": {
+        "resolution_status": "family_only",
+        "resolution_reason": "Uses flavin-dependent EREDs, but local metadata does not resolve a concrete enzyme/organism; do not infer OYE1.",
+        "specific_enzyme_names": "",
+        "parent_enzyme_names": "ERED/OYE family",
+        "canonical_enzyme": "ERED/OYE family",
+        "mutations_or_variants": "",
+        "organism_candidates": "",
+        "organism_evidence": "doi_override:ERED family, no specific organism in local metadata",
+        "enzyme_family": "ERED/OYE",
+        "enzyme_name_original": "flavin-dependent ene-reductases (EREDs)",
+        "flavin_cofactor": "flavin unspecified; exogenous Ru(bpy)3 photosensitizer",
+        "cofactor_class": "flavin",
+        "cofactor_detail": "flavin | Ru(bpy)3 external photocatalyst",
+        "cofactor_evidence": "doi_override:flavin-dependent ene-reductases",
+        "flavin_dependency_status": "likely_flavin_dependent",
+        "enzyme_function_class": "ERED/OYE ene-reductase",
+        "ec_number_candidates": "",
+        "sequence_resolution_route": "paper_supplement_then_database",
+    },
+    "10.1002/anie.202311762": {
+        "cofactor_class": "flavin",
+        "cofactor_detail": "FMN/flavin in GluER",
+        "cofactor_evidence": "abstract:flavin-dependent ene-reductase GluER; PDB 6O08 contains FMN",
+        "flavin_dependency_status": "confirmed_flavin_dependent",
+        "enzyme_function_class": "ERED/OYE ene-reductase",
+        "sequence_resolution_route": "pdb_first",
+        "pdb_ids": "6O08",
+        "uniprot_id": "A1E8I9",
+        "organism_candidates": "Gluconobacter oxydans",
+        "organism_evidence": "doi_override:PDB 6O08 organism Gluconobacter oxydans",
+    },
+    "10.1002/ange.202311762": {
+        "cofactor_class": "flavin",
+        "cofactor_detail": "FMN/flavin in GluER",
+        "cofactor_evidence": "abstract:flavin-dependent ene-reductase GluER; PDB 6O08 contains FMN",
+        "flavin_dependency_status": "confirmed_flavin_dependent",
+        "enzyme_function_class": "ERED/OYE ene-reductase",
+        "sequence_resolution_route": "pdb_first",
+        "pdb_ids": "6O08",
+        "uniprot_id": "A1E8I9",
+        "organism_candidates": "Gluconobacter oxydans",
+        "organism_evidence": "doi_override:PDB 6O08 organism Gluconobacter oxydans",
+    },
+}
 
 
 def read_csv(path: Path) -> List[Dict[str, str]]:
@@ -106,6 +200,10 @@ def write_csv(path: Path, rows: Sequence[Dict[str, str]], fields: Sequence[str])
 
 def norm_space(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def row_context(row: Dict[str, str]) -> str:
+    return " ".join(norm_space(row.get(k, "")) for k in CONTEXT_FIELDS)
 
 
 def split_multi(value: str) -> List[str]:
@@ -151,10 +249,7 @@ def is_generic_name(value: str, title: str = "") -> bool:
 
 
 def extract_specific_names(row: Dict[str, str]) -> List[str]:
-    text = " ".join(
-        norm_space(row.get(k, ""))
-        for k in ["enzyme_name", "enzyme_name_or_target", "title", "abstract", "evidence_summary", "metadata_keywords"]
-    )
+    text = row_context(row)
     names: List[str] = []
     for field in ["enzyme_name", "enzyme_name_or_target"]:
         for part in split_multi(row.get(field, "")):
@@ -202,15 +297,12 @@ def extract_mutations(names: Sequence[str], row: Dict[str, str]) -> List[str]:
 
 
 def extract_organisms(row: Dict[str, str], names: Sequence[str]) -> Tuple[List[str], List[str]]:
-    text = " ".join(
-        norm_space(row.get(k, ""))
-        for k in ["enzyme_name", "enzyme_name_or_target", "title", "abstract", "evidence_summary", "metadata_keywords"]
-    )
+    text = row_context(row)
     organisms: List[str] = []
     evidence: List[str] = []
     for name in names:
         for key, organism in ORGANISM_ALIASES.items():
-            if key.lower() in name.lower() or key.lower() in text.lower():
+            if key.lower() in name.lower():
                 organisms.append(organism)
                 evidence.append(f"alias:{key}")
     for organism in KNOWN_ORGANISM_NAMES:
@@ -262,9 +354,184 @@ def dedupe(values: Iterable[str]) -> List[str]:
     return out
 
 
+def extract_pdb_ids(row: Dict[str, str]) -> Tuple[List[str], List[str]]:
+    text = " ".join([row.get("pdb_ids", ""), row_context(row)])
+    ids: List[str] = []
+    evidence: List[str] = []
+    for raw in split_multi(row.get("pdb_ids", "")):
+        candidate = raw.upper()
+        if is_pdb_id(candidate):
+            ids.append(candidate)
+            evidence.append(f"csv:{candidate}")
+    for match in re.findall(r"\b(?:PDB|RCSB|structure)\s*(?:ID|entry|code|accession)?s?\s*[:#]?\s*([0-9][A-Za-z0-9]{3})\b", text, flags=re.I):
+        candidate = match.upper()
+        if is_pdb_id(candidate):
+            ids.append(candidate)
+            evidence.append(f"text:{candidate}")
+    return dedupe(ids), dedupe(evidence)
+
+
+def is_pdb_id(value: str) -> bool:
+    value = norm_space(value).upper()
+    return bool(re.fullmatch(r"[0-9][A-Z0-9]{3}", value)) and value not in FALSE_PDB_IDS
+
+
+def pdb_urls(pdb_ids: Sequence[str], query: str) -> Dict[str, str]:
+    pdb_ids = [p.upper() for p in pdb_ids if is_pdb_id(p)]
+    if pdb_ids:
+        pdb_entry_url = " | ".join(f"https://www.rcsb.org/structure/{p}" for p in pdb_ids)
+        rcsb_query = "https://www.rcsb.org/search?request=" + quote_plus(" ".join(pdb_ids))
+    else:
+        pdb_entry_url = ""
+        rcsb_query = "https://www.rcsb.org/search?request=" + quote_plus(query)
+    return {
+        "pdb_url": pdb_entry_url,
+        "rcsb_search_url": rcsb_query,
+    }
+
+
+def extract_ec_numbers(row: Dict[str, str]) -> List[str]:
+    return dedupe(EC_RE.findall(row_context(row)))
+
+
+def infer_cofactor_and_function(row: Dict[str, str], names: Sequence[str]) -> Dict[str, str]:
+    text = " ".join([row_context(row), " ".join(names)]).lower()
+    evidence: List[str] = []
+    detail: List[str] = []
+
+    flavin_hits = []
+    for label, pattern in [
+        ("FAD", r"\bfad\b|flavin adenine dinucleotide"),
+        ("FMN", r"\bfmn\b|flavin mononucleotide"),
+        ("flavin", r"\bflavin\b|\bflavoenzyme\b|flavin-dependent|flavin dependent"),
+    ]:
+        if re.search(pattern, text):
+            flavin_hits.append(label)
+    if flavin_hits:
+        detail.extend(dedupe(flavin_hits))
+        evidence.append("text:" + "/".join(dedupe(flavin_hits)))
+
+    non_flavin_hits = []
+    for label, pattern in [
+        ("ThDP", r"\bthdp\b|thiamine diphosphate|thiamin diphosphate|thiamine pyrophosphate|\btpp\b"),
+        ("PQQ", r"\bpqq\b|pyrroloquinoline quinone"),
+        ("PLP", r"\bplp\b|pyridoxal phosphate|pyridoxal-5"),
+        ("heme", r"\bheme\b|\bhaem\b|\bcytochrome p450\b|\bp450\b"),
+        ("iron", r"nonheme iron|non-heme iron|\biron enzyme\b"),
+        ("NAD(P)H", r"\bnadph\b|\bnadh\b|\bnad\(p\)h\b|\bnadp\+\b|\bnad\+\b"),
+    ]:
+        if re.search(pattern, text):
+            non_flavin_hits.append(label)
+    if non_flavin_hits:
+        detail.extend(dedupe(non_flavin_hits))
+        evidence.append("text:" + "/".join(dedupe(non_flavin_hits)))
+
+    family, function = infer_enzyme_function(row, names)
+    cofactor_class = "unknown"
+    status = "unknown"
+
+    if "ThDP" in non_flavin_hits and not flavin_hits:
+        cofactor_class = "thdp"
+        status = "non_flavin_thdp"
+    elif "PQQ" in non_flavin_hits and not flavin_hits:
+        cofactor_class = "pqq"
+        status = "non_flavin_pqq"
+    elif "PLP" in non_flavin_hits and not flavin_hits:
+        cofactor_class = "plp"
+        status = "non_flavin_plp"
+    elif "heme" in non_flavin_hits and not flavin_hits:
+        cofactor_class = "heme"
+        status = "non_flavin_heme"
+    elif flavin_hits and any(hit in non_flavin_hits for hit in ["ThDP", "PQQ", "PLP", "heme", "iron"]):
+        cofactor_class = "mixed_or_external"
+        status = "mixed_or_review"
+    elif flavin_hits:
+        cofactor_class = "flavin"
+        if re.search(r"flavin-dependent|flavin dependent|flavoenzyme|fmn-dependent|fad-dependent", text):
+            status = "confirmed_flavin_dependent"
+        else:
+            status = "likely_flavin_dependent"
+    elif family in {"ERED/OYE ene-reductase", "fatty acid photodecarboxylase", "flavin-dependent halogenase", "flavin monooxygenase", "nitroreductase", "photolyase/cryptochrome"}:
+        cofactor_class = "flavin"
+        status = "likely_flavin_dependent"
+        evidence.append(f"family:{family}")
+    elif "NAD(P)H" in non_flavin_hits:
+        cofactor_class = "nad(p)h_only"
+        status = "unknown_or_nadph_only"
+
+    return {
+        "cofactor_class": cofactor_class,
+        "cofactor_detail": " | ".join(dedupe(detail)),
+        "cofactor_evidence": " | ".join(dedupe(evidence)),
+        "flavin_dependency_status": status,
+        "enzyme_function_class": function,
+    }
+
+
+def infer_enzyme_function(row: Dict[str, str], names: Sequence[str]) -> Tuple[str, str]:
+    text = " ".join([row_context(row), " ".join(names)]).lower()
+    checks = [
+        ("ThDP-dependent benzaldehyde lyase", r"pfbal|benzaldehyde lyase|thdp|thiamine diphosphate"),
+        ("ERED/OYE ene-reductase", r"\bered\b|ene[- ]reductase|old yellow enzyme|\boye\d*\b|gluer|gsoye|oaer"),
+        ("fatty acid photodecarboxylase", r"\bfap\b|fatty acid photodecarboxylase|photodecarboxylase|cvfap"),
+        ("flavin-dependent halogenase", r"flavin-dependent halogenase|flavin dependent halogenase|halogenase"),
+        ("flavin monooxygenase", r"flavin monooxygenase|\bfmo\b|monooxygenase"),
+        ("nitroreductase", r"nitroreductase|\bntr\b|nitronate monooxygenase"),
+        ("photolyase/cryptochrome", r"photolyase|cryptochrome"),
+        ("flavin reductase/dehydrogenase", r"flavin reductase|flavin-dependent dehydrogenase|flavin dependent dehydrogenase|d-arginine dehydrogenase|fdh\b|dehydrogenase"),
+        ("PQQ enzyme", r"\bpqq\b|pyrroloquinoline quinone"),
+        ("PLP enzyme", r"\bplp\b|pyridoxal phosphate"),
+        ("heme/P450 enzyme", r"\bp450\b|\bheme\b|\bhaem\b"),
+    ]
+    for label, pattern in checks:
+        if re.search(pattern, text):
+            return label, label
+    family = norm_space(row.get("enzyme_family", "")) or "unknown"
+    return family, family
+
+
+def choose_sequence_route(row: Dict[str, str], names: Sequence[str], organisms: Sequence[str], pdb_ids: Sequence[str], dependency: str) -> str:
+    if dependency.startswith("non_flavin_"):
+        return "exclude_non_flavin"
+    if pdb_ids:
+        return "pdb_first"
+    if "pdb available" in row_context(row).lower():
+        return "pdb_search_first"
+    if names and organisms:
+        return "uniprot_by_name_organism"
+    if names:
+        return "paper_supplement_then_database"
+    return "manual_literature_review"
+
+
+def apply_known_override(candidate: Dict[str, str], doi: str) -> None:
+    override = KNOWN_PAPER_OVERRIDES.get(doi)
+    if not override:
+        return
+    for key, value in override.items():
+        if key in {"pdb_ids", "uniprot_id"} and candidate.get(key) and value:
+            candidate[key] = " | ".join(dedupe(split_multi(candidate[key]) + split_multi(value)))
+        elif key in {"organism_candidates", "organism_evidence"} and value:
+            candidate[key] = value
+        else:
+            candidate[key] = value
+    canonical = candidate.get("canonical_enzyme") or parent_enzyme_name(split_multi(candidate.get("specific_enzyme_names", ""))[0])
+    organisms = split_multi(candidate.get("organism_candidates", ""))
+    organism = organisms[0] if organisms else ""
+    urls = query_urls(canonical, organism)
+    purls = pdb_urls(split_multi(candidate.get("pdb_ids", "")), " ".join(t for t in [canonical, organism, candidate.get("title", "")] if t))
+    candidate.update(urls)
+    candidate.update(purls)
+    candidate["protein_query"] = " ".join(t for t in [canonical, organism] if t)
+    candidate["dna_query"] = " ".join(t for t in [canonical, organism, "gene"] if t)
+
+
 def classify_row(row: Dict[str, str], names: Sequence[str], organisms: Sequence[str]) -> Tuple[str, str]:
     title = row.get("title", "")
     base_name = row.get("enzyme_name") or row.get("enzyme_name_or_target") or ""
+    dependency = row.get("flavin_dependency_status", "")
+    if dependency.startswith("non_flavin_"):
+        return "non_flavin_exclude", "Non-flavin enzyme/cofactor system; not a FASTA seed for the flavin-dependent goal."
     if any(hint in title.lower() for hint in REVIEW_HINTS):
         return "review_or_family_context", "Review/background paper; use for leads, not direct FASTA seed."
     if not names and is_generic_name(base_name, title):
@@ -309,14 +576,22 @@ def combine_rows(enzyme_rows: List[Dict[str, str]], homolog_rows: List[Dict[str,
 def build_candidates(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
     out = []
     for row in rows:
+        doi = norm_space(row.get("doi", "")).lower()
         names = extract_specific_names(row)
         mutations = extract_mutations(names, row)
         organisms, organism_evidence = extract_organisms(row, names)
-        status, reason = classify_row(row, names, organisms)
+        pdb_ids, pdb_evidence = extract_pdb_ids(row)
+        cofactor = infer_cofactor_and_function(row, names)
+        row_for_status = dict(row)
+        row_for_status.update(cofactor)
+        status, reason = classify_row(row_for_status, names, organisms)
+        route = choose_sequence_route(row_for_status, names, organisms, pdb_ids, cofactor["flavin_dependency_status"])
         name_for_query = parent_enzyme_name(names[0]) if names else clean_candidate_name(row.get("enzyme_name") or row.get("enzyme_name_or_target", ""))
         organism_for_query = organisms[0] if organisms else ""
         urls = query_urls(name_for_query, organism_for_query)
-        out.append({
+        pdb_link_query = " ".join(t for t in [name_for_query, organism_for_query, row.get("title", "")] if t)
+        purls = pdb_urls(pdb_ids, pdb_link_query)
+        candidate = {
             "resolution_status": status,
             "resolution_reason": reason,
             "specific_enzyme_names": " | ".join(names),
@@ -327,6 +602,7 @@ def build_candidates(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
             "protein_query": " ".join(t for t in [name_for_query, organism_for_query] if t),
             "dna_query": " ".join(t for t in [name_for_query, organism_for_query, "gene"] if t),
             **urls,
+            **purls,
             "enzyme_family": row.get("enzyme_family", ""),
             "enzyme_name_original": row.get("enzyme_name") or row.get("enzyme_name_or_target", ""),
             "doi": row.get("doi", ""),
@@ -341,23 +617,32 @@ def build_candidates(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
             "structure_similarity_hint": row.get("structure_similarity_hint", ""),
             "criteria_status": row.get("criteria_status", ""),
             "manual_review_priority": row.get("manual_review_priority", row.get("seed_priority", "")),
-            "pdb_ids": row.get("pdb_ids", ""),
+            "pdb_ids": " | ".join(pdb_ids),
+            "pdb_evidence": " | ".join(pdb_evidence),
             "uniprot_id": row.get("uniprot_id", ""),
+            "ec_number_candidates": " | ".join(extract_ec_numbers(row)),
+            "sequence_resolution_route": route,
+            **cofactor,
             "evidence_summary": row.get("evidence_summary") or row.get("abstract", ""),
-        })
+        }
+        apply_known_override(candidate, doi)
+        out.append(candidate)
     return sorted(dedupe_candidates(out), key=sort_key)
 
 
 def canonical_enzyme_name(row: Dict[str, str]) -> str:
+    if row.get("canonical_enzyme"):
+        return row["canonical_enzyme"]
     blob = " | ".join([
         row.get("specific_enzyme_names", ""),
         row.get("parent_enzyme_names", ""),
         row.get("enzyme_name_original", ""),
     ])
     priority = [
-        r"\bCvFAP\b", r"\bGluER\b", r"\bGsOYE\b", r"\bOaER\b", r"\bOYE1\b", r"\bPaDADH\b",
+        r"\bPfBAL\b", r"\bCvFAP\b", r"\bGluER\b", r"\bGsOYE\b", r"\bOaER\b", r"\bOYE1\b", r"\bPaDADH\b",
         r"\bPqsL\b", r"\b[A-Z][a-z]{1,4}ER\b", r"\b[A-Z][a-z]OYE\d*\b",
         r"\b[A-Z][a-z]{1,5}FDH\b", r"\b[A-Z][a-z]{1,5}NTR\b",
+        r"\bbenzaldehyde lyase\b",
         r"\bPseudomonas aeruginosa D-arginine dehydrogenase\b",
         r"\bovenolide biosynthetic flavoenzyme\b",
     ]
@@ -382,6 +667,7 @@ def dedupe_candidates(rows: Sequence[Dict[str, str]]) -> List[Dict[str, str]]:
         "needs_manual_review": 2,
         "family_only": 3,
         "review_or_family_context": 4,
+        "non_flavin_exclude": 5,
     }
     for row in rows:
         canonical = canonical_enzyme_name(row)
@@ -400,8 +686,15 @@ def dedupe_candidates(rows: Sequence[Dict[str, str]]) -> List[Dict[str, str]]:
         for field in [
             "specific_enzyme_names", "parent_enzyme_names", "mutations_or_variants",
             "organism_candidates", "organism_evidence", "pdb_ids", "uniprot_id",
+            "pdb_evidence", "ec_number_candidates", "cofactor_detail", "cofactor_evidence",
         ]:
             current[field] = " | ".join(dedupe(split_multi(current.get(field, "")) + split_multi(row.get(field, ""))))
+        for field in [
+            "cofactor_class", "flavin_dependency_status", "enzyme_function_class",
+            "sequence_resolution_route", "pdb_url", "rcsb_search_url",
+        ]:
+            if not current.get(field) and row.get(field):
+                current[field] = row[field]
         if len(norm_space(row.get("evidence_summary", ""))) > len(norm_space(current.get("evidence_summary", ""))):
             current["evidence_summary"] = row.get("evidence_summary", "")
         if not current.get("title") and row.get("title"):
@@ -411,7 +704,9 @@ def dedupe_candidates(rows: Sequence[Dict[str, str]]) -> List[Dict[str, str]]:
         organisms = split_multi(row.get("organism_candidates", ""))
         organism = organisms[0] if organisms else ""
         urls = query_urls(canonical, organism)
+        purls = pdb_urls(split_multi(row.get("pdb_ids", "")), " ".join(t for t in [canonical, organism, row.get("title", "")] if t))
         row.update(urls)
+        row.update(purls)
         row["protein_query"] = " ".join(t for t in [canonical, organism] if t)
         row["dna_query"] = " ".join(t for t in [canonical, organism, "gene"] if t)
     return list(grouped.values())
@@ -424,20 +719,42 @@ def sort_key(row: Dict[str, str]) -> Tuple[int, int, int, str]:
         "needs_manual_review": 2,
         "family_only": 3,
         "review_or_family_context": 4,
+        "non_flavin_exclude": 5,
     }.get(row["resolution_status"], 5)
+    dependency_score = {
+        "confirmed_flavin_dependent": 0,
+        "likely_flavin_dependent": 1,
+        "mixed_or_review": 2,
+        "unknown": 3,
+        "unknown_or_nadph_only": 3,
+    }.get(row.get("flavin_dependency_status", ""), 4)
     priority_score = 0 if row.get("manual_review_priority") == "high" else 1
     new_score = 0 if str(row.get("new_to_nature_reaction", "")).lower() == "true" else 1
-    return (status_score, priority_score, new_score, row.get("title", ""))
+    return (dependency_score, status_score, priority_score, new_score, row.get("title", ""))
 
 
 def render_html(rows: Sequence[Dict[str, str]], output_path: Path) -> None:
     counts = defaultdict(int)
+    dep_counts = defaultdict(int)
+    cofactor_counts = defaultdict(int)
+    function_counts = defaultdict(int)
     for row in rows:
         counts[row["resolution_status"]] += 1
-    cards = "\n".join(
-        f"<div class='stat'><b>{html.escape(k)}</b><span>{v}</span></div>"
-        for k, v in sorted(counts.items())
-    )
+        dep_counts[row.get("flavin_dependency_status", "unknown")] += 1
+        cofactor_counts[row.get("cofactor_class", "unknown")] += 1
+        function_counts[row.get("enzyme_function_class", "unknown")] += 1
+    cards = "\n".join([
+        "<div class='stat stat-total'><b>Total rows</b><span>{}</span></div>".format(len(rows)),
+        *[
+            f"<div class='stat'><b>{html.escape(k)}</b><span>{v}</span></div>"
+            for k, v in sorted(dep_counts.items(), key=lambda item: (-item[1], item[0]))[:8]
+        ],
+    ])
+    status_options = options_from(rows, "resolution_status", "All readiness")
+    dependency_options = options_from(rows, "flavin_dependency_status", "All dependencies")
+    cofactor_options = options_from(rows, "cofactor_class", "All cofactors")
+    function_options = options_from(rows, "enzyme_function_class", "All functions")
+    route_options = options_from(rows, "sequence_resolution_route", "All routes")
     table_rows = "\n".join(render_row(row) for row in rows)
     doc = f"""<!doctype html>
 <html lang="en">
@@ -446,47 +763,66 @@ def render_html(rows: Sequence[Dict[str, str]], output_path: Path) -> None:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sequence Seed Review</title>
 <style>
-:root {{ color-scheme: light; --ink:#1f2933; --muted:#64748b; --line:#d7dee8; --bg:#f7f9fb; --panel:#ffffff; --accent:#006d77; --warn:#a15c00; --bad:#a11d33; }}
-body {{ margin:0; font:14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; color:var(--ink); background:var(--bg); }}
-header {{ padding:22px 28px 14px; background:var(--panel); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:4; }}
-h1 {{ margin:0 0 8px; font-size:22px; letter-spacing:0; }}
-.sub {{ color:var(--muted); max-width:1100px; }}
-.stats {{ display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; }}
-.stat {{ border:1px solid var(--line); background:#fbfdff; padding:8px 10px; border-radius:6px; min-width:160px; display:flex; justify-content:space-between; gap:16px; }}
-.toolbar {{ display:flex; gap:10px; flex-wrap:wrap; padding:12px 28px; background:#eef4f6; border-bottom:1px solid var(--line); }}
-input, select {{ height:34px; border:1px solid var(--line); border-radius:6px; padding:0 10px; background:white; }}
-input {{ min-width:320px; flex:1; }}
-main {{ padding:18px 28px 32px; }}
-table {{ border-collapse:collapse; width:100%; background:var(--panel); border:1px solid var(--line); }}
-th, td {{ border-bottom:1px solid var(--line); vertical-align:top; padding:9px 10px; }}
-th {{ text-align:left; background:#f1f5f8; position:sticky; top:109px; z-index:3; font-size:12px; color:#334155; }}
+:root {{ color-scheme: light; --ink:#17202a; --muted:#64748b; --line:#d6dee8; --bg:#f5f7fa; --panel:#ffffff; --soft:#eef4f7; --accent:#006d77; --good:#0f766e; --warn:#9a5b00; --bad:#9f1239; --blue:#285a8d; }}
+* {{ box-sizing:border-box; }}
+body {{ margin:0; font:13px/1.42 system-ui, -apple-system, Segoe UI, sans-serif; color:var(--ink); background:var(--bg); }}
+header {{ padding:18px 24px 12px; background:var(--panel); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }}
+h1 {{ margin:0; font-size:21px; letter-spacing:0; }}
+.sub {{ color:var(--muted); max-width:1160px; margin-top:5px; }}
+.stats {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(178px, 1fr)); gap:8px; margin-top:12px; }}
+.stat {{ border:1px solid var(--line); background:#fbfdff; padding:8px 10px; border-radius:6px; min-width:0; display:flex; justify-content:space-between; gap:12px; }}
+.stat b {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+.stat span {{ font-weight:700; color:var(--accent); }}
+.stat-total {{ background:#e8f4f3; border-color:#9ccfca; }}
+.toolbar {{ display:grid; grid-template-columns:minmax(260px, 1.6fr) repeat(6, minmax(150px, 1fr)); gap:8px; padding:10px 24px; background:var(--soft); border-bottom:1px solid var(--line); position:sticky; top:129px; z-index:4; }}
+input, select {{ height:34px; min-width:0; border:1px solid var(--line); border-radius:6px; padding:0 9px; background:white; color:var(--ink); }}
+main {{ padding:16px 24px 30px; }}
+table {{ border-collapse:collapse; width:100%; background:var(--panel); border:1px solid var(--line); table-layout:fixed; }}
+th, td {{ border-bottom:1px solid var(--line); vertical-align:top; padding:8px 9px; word-break:break-word; }}
+th {{ text-align:left; background:#f1f5f8; position:sticky; top:184px; z-index:3; font-size:12px; color:#334155; }}
 tr:hover td {{ background:#fbfdff; }}
-.status {{ display:inline-block; padding:2px 7px; border-radius:999px; font-size:12px; border:1px solid var(--line); background:#f8fafc; white-space:nowrap; }}
-.specific_with_organism {{ color:#075e54; border-color:#86c5b9; background:#eaf8f5; }}
-.specific_missing_organism {{ color:#7a4d00; border-color:#e4bd75; background:#fff7e6; }}
-.family_only, .review_or_family_context {{ color:#7c2432; border-color:#e5a3af; background:#fff0f3; }}
-.small {{ color:var(--muted); font-size:12px; }}
-.title {{ max-width:340px; }}
-.evidence {{ max-width:420px; }}
+.pill {{ display:inline-block; padding:2px 7px; border-radius:999px; font-size:12px; border:1px solid var(--line); background:#f8fafc; white-space:nowrap; margin:0 4px 4px 0; }}
+.specific_with_organism, .confirmed_flavin_dependent {{ color:var(--good); border-color:#86c5b9; background:#eaf8f5; }}
+.likely_flavin_dependent, .specific_missing_organism {{ color:var(--blue); border-color:#9ebee1; background:#edf5ff; }}
+.mixed_or_review, .unknown, .unknown_or_nadph_only, .family_only, .review_or_family_context {{ color:var(--warn); border-color:#e4bd75; background:#fff7e6; }}
+.non_flavin_exclude, .non_flavin_thdp, .non_flavin_pqq, .non_flavin_plp, .non_flavin_heme {{ color:var(--bad); border-color:#e5a3af; background:#fff0f3; }}
+.small {{ color:var(--muted); font-size:12px; margin-top:3px; }}
+.title {{ width:25%; }}
+.enzyme {{ width:19%; }}
+.dependency {{ width:17%; }}
+.links {{ width:18%; }}
+.evidence {{ max-height:9.2em; overflow:auto; }}
 a {{ color:var(--accent); text-decoration:none; }}
 a:hover {{ text-decoration:underline; }}
 .links a {{ display:block; margin-bottom:3px; }}
+@media (max-width: 980px) {{
+  header {{ position:static; }}
+  .toolbar {{ position:static; grid-template-columns:1fr 1fr; }}
+  th {{ position:static; }}
+  table {{ table-layout:auto; min-width:980px; }}
+  main {{ overflow:auto; }}
+}}
 </style>
 </head>
 <body>
 <header>
   <h1>Sequence Seed Review</h1>
-  <div class="sub">Offline review of enzyme-to-sequence readiness. Use specific enzyme names and organism/source evidence before trusting any protein or DNA FASTA hit.</div>
+  <div class="sub">Offline evidence table for flavin-dependence, enzyme function, organism source, PDB-first routes, and FASTA seed readiness.</div>
   <div class="stats">{cards}</div>
 </header>
 <div class="toolbar">
   <input id="q" placeholder="Search title, enzyme, organism, DOI, reaction">
-  <select id="status"><option value="">All statuses</option>{''.join(f'<option>{html.escape(k)}</option>' for k in sorted(counts))}</select>
+  <select id="dependency">{dependency_options}</select>
+  <select id="cofactor">{cofactor_options}</select>
+  <select id="functionClass">{function_options}</select>
+  <select id="status">{status_options}</select>
+  <select id="route">{route_options}</select>
+  <select id="pdb"><option value="">All PDB</option><option value="yes">PDB present</option><option value="no">No PDB</option></select>
 </div>
 <main>
 <table id="tbl">
 <thead><tr>
-<th>Status</th><th>Specific Enzyme</th><th>Organism Evidence</th><th>Queries</th><th>Paper / Evidence</th><th>Reaction</th>
+<th class="dependency">Dependency</th><th class="enzyme">Specific Enzyme</th><th>Organism / Route</th><th class="links">Sequence Links</th><th class="title">Paper / Evidence</th><th>Reaction</th>
 </tr></thead>
 <tbody>
 {table_rows}
@@ -496,34 +832,79 @@ a:hover {{ text-decoration:underline; }}
 <script>
 const q = document.getElementById('q');
 const status = document.getElementById('status');
+const dependency = document.getElementById('dependency');
+const cofactor = document.getElementById('cofactor');
+const functionClass = document.getElementById('functionClass');
+const route = document.getElementById('route');
+const pdb = document.getElementById('pdb');
 const rows = [...document.querySelectorAll('tbody tr')];
 function apply() {{
   const needle = q.value.toLowerCase();
-  const st = status.value;
+  const filters = {{
+    status: status.value,
+    dependency: dependency.value,
+    cofactor: cofactor.value,
+    functionClass: functionClass.value,
+    route: route.value,
+  }};
   rows.forEach(row => {{
     const okText = !needle || row.innerText.toLowerCase().includes(needle);
-    const okStatus = !st || row.dataset.status === st;
-    row.style.display = okText && okStatus ? '' : 'none';
+    const okStatus = !filters.status || row.dataset.status === filters.status;
+    const okDep = !filters.dependency || row.dataset.dependency === filters.dependency;
+    const okCofactor = !filters.cofactor || row.dataset.cofactor === filters.cofactor;
+    const okFunction = !filters.functionClass || row.dataset.functionClass === filters.functionClass;
+    const okRoute = !filters.route || row.dataset.route === filters.route;
+    const okPdb = !pdb.value || row.dataset.pdb === pdb.value;
+    row.style.display = okText && okStatus && okDep && okCofactor && okFunction && okRoute && okPdb ? '' : 'none';
   }});
 }}
 q.addEventListener('input', apply);
 status.addEventListener('input', apply);
+dependency.addEventListener('input', apply);
+cofactor.addEventListener('input', apply);
+functionClass.addEventListener('input', apply);
+route.addEventListener('input', apply);
+pdb.addEventListener('input', apply);
 </script>
 </body></html>"""
     output_path.write_text(doc, encoding="utf-8")
+
+
+def options_from(rows: Sequence[Dict[str, str]], field: str, label: str) -> str:
+    values = sorted({norm_space(row.get(field, "")) or "unknown" for row in rows})
+    options = [f'<option value="">{html.escape(label)}</option>']
+    options.extend(f'<option>{html.escape(value)}</option>' for value in values)
+    return "".join(options)
 
 
 def render_row(row: Dict[str, str]) -> str:
     doi = row.get("doi", "")
     doi_link = f"<a href='https://doi.org/{html.escape(doi)}'>{html.escape(doi)}</a>" if doi else ""
     evidence = norm_space(row.get("evidence_summary", ""))[:520]
-    return f"""<tr data-status="{html.escape(row['resolution_status'])}">
-<td><span class="status {html.escape(row['resolution_status'])}">{html.escape(row['resolution_status'])}</span><div class="small">{html.escape(row['resolution_reason'])}</div></td>
-<td><b>{html.escape(row.get('canonical_enzyme') or row.get('specific_enzyme_names') or row.get('enzyme_name_original',''))}</b><div class="small">Names: {html.escape(row.get('specific_enzyme_names',''))}</div><div class="small">Parent: {html.escape(row.get('parent_enzyme_names',''))}</div><div class="small">Variants: {html.escape(row.get('mutations_or_variants',''))}</div><div class="small">Family: {html.escape(row.get('enzyme_family',''))}</div></td>
-<td>{html.escape(row.get('organism_candidates',''))}<div class="small">{html.escape(row.get('organism_evidence',''))}</div></td>
-<td class="links"><a href="{html.escape(row['uniprot_url'])}">UniProt protein</a><a href="{html.escape(row['ncbi_protein_url'])}">NCBI Protein</a><a href="{html.escape(row['ncbi_nucleotide_url'])}">NCBI Nucleotide/gene</a><a href="{html.escape(row['ena_url'])}">ENA text search</a><div class="small">Protein: {html.escape(row.get('protein_query',''))}</div><div class="small">DNA: {html.escape(row.get('dna_query',''))}</div></td>
+    dep = row.get("flavin_dependency_status", "unknown")
+    cofactor = row.get("cofactor_class", "unknown")
+    function_class = row.get("enzyme_function_class", "unknown")
+    route = row.get("sequence_resolution_route", "manual_literature_review")
+    pdb_ids = split_multi(row.get("pdb_ids", ""))
+    pdb_present = "yes" if pdb_ids else "no"
+    pdb_links = "".join(
+        f'<a href="https://www.rcsb.org/structure/{html.escape(pid)}">PDB {html.escape(pid)}</a>'
+        for pid in pdb_ids
+    )
+    if not pdb_links and row.get("rcsb_search_url"):
+        pdb_links = f'<a href="{html.escape(row["rcsb_search_url"])}">RCSB search</a>'
+    uniprot_ids = split_multi(row.get("uniprot_id", ""))
+    uniprot_id_links = "".join(
+        f'<a href="https://www.uniprot.org/uniprotkb/{html.escape(uid)}/entry">UniProt {html.escape(uid)}</a>'
+        for uid in uniprot_ids
+    )
+    return f"""<tr data-status="{html.escape(row['resolution_status'])}" data-dependency="{html.escape(dep)}" data-cofactor="{html.escape(cofactor)}" data-function-class="{html.escape(function_class)}" data-route="{html.escape(route)}" data-pdb="{pdb_present}">
+<td><span class="pill {html.escape(dep)}">{html.escape(dep)}</span><span class="pill {html.escape(cofactor)}">{html.escape(cofactor)}</span><div class="small">{html.escape(row.get('cofactor_detail',''))}</div><div class="small">{html.escape(row.get('cofactor_evidence',''))}</div><div class="small">EC: {html.escape(row.get('ec_number_candidates',''))}</div></td>
+<td class="enzyme"><b>{html.escape(row.get('canonical_enzyme') or row.get('specific_enzyme_names') or row.get('enzyme_name_original',''))}</b><div class="small">Names: {html.escape(row.get('specific_enzyme_names',''))}</div><div class="small">Parent: {html.escape(row.get('parent_enzyme_names',''))}</div><div class="small">Variants: {html.escape(row.get('mutations_or_variants',''))}</div><div class="small">Function: {html.escape(function_class)}</div><div class="small">Family: {html.escape(row.get('enzyme_family',''))}</div></td>
+<td><span class="pill {html.escape(row['resolution_status'])}">{html.escape(row['resolution_status'])}</span><div class="small">{html.escape(row['resolution_reason'])}</div><b>{html.escape(row.get('organism_candidates',''))}</b><div class="small">{html.escape(row.get('organism_evidence',''))}</div><div class="small">Route: {html.escape(route)}</div></td>
+<td class="links">{uniprot_id_links}<a href="{html.escape(row['uniprot_url'])}">UniProt search</a><a href="{html.escape(row['ncbi_protein_url'])}">NCBI Protein</a><a href="{html.escape(row['ncbi_nucleotide_url'])}">NCBI Nucleotide/gene</a><a href="{html.escape(row['ena_url'])}">ENA text search</a>{pdb_links}<div class="small">Protein: {html.escape(row.get('protein_query',''))}</div><div class="small">DNA: {html.escape(row.get('dna_query',''))}</div></td>
 <td class="title"><b>{html.escape(row.get('title',''))}</b><div>{doi_link}</div><div class="small">{html.escape(str(row.get('year','')))} {html.escape(row.get('journal',''))}</div><div class="evidence small">{html.escape(evidence)}</div></td>
-<td>{html.escape(row.get('reaction_type',''))}<div class="small">new-to-nature={html.escape(str(row.get('new_to_nature_reaction','')))}</div><div class="small">{html.escape(row.get('characterized_enzyme_evidence',''))}</div></td>
+<td>{html.escape(row.get('reaction_type',''))}<div class="small">new-to-nature={html.escape(str(row.get('new_to_nature_reaction','')))}</div><div class="small">{html.escape(row.get('characterized_enzyme_evidence',''))}</div><div class="small">{html.escape(row.get('structure_similarity_hint',''))}</div></td>
 </tr>"""
 
 
@@ -545,11 +926,13 @@ def main() -> None:
         "resolution_status", "resolution_reason", "specific_enzyme_names",
         "canonical_enzyme", "parent_enzyme_names", "mutations_or_variants", "organism_candidates",
         "organism_evidence", "protein_query", "dna_query", "uniprot_url",
-        "ncbi_protein_url", "ncbi_nucleotide_url", "ena_url", "enzyme_family",
+        "ncbi_protein_url", "ncbi_nucleotide_url", "ena_url", "pdb_url", "rcsb_search_url",
+        "cofactor_class", "cofactor_detail", "cofactor_evidence", "flavin_dependency_status",
+        "enzyme_function_class", "ec_number_candidates", "sequence_resolution_route", "enzyme_family",
         "enzyme_name_original", "doi", "title", "year", "journal", "search_track",
         "flavin_cofactor", "reaction_type", "new_to_nature_reaction",
         "characterized_enzyme_evidence", "structure_similarity_hint", "criteria_status",
-        "manual_review_priority", "pdb_ids", "uniprot_id", "evidence_summary",
+        "manual_review_priority", "pdb_ids", "pdb_evidence", "uniprot_id", "evidence_summary",
     ]
     csv_path = outdir / f"{args.prefix}_candidates.csv"
     html_path = outdir / f"{args.prefix}_review.html"
