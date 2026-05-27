@@ -34,7 +34,7 @@ Tree/iTOL stage:
 - `02_ssn/tree_analysis/itol_kingdom_color_strip.txt`
 - `02_ssn/tree_analysis/itol_phylum_label.txt`
 - `02_ssn/tree_analysis/itol_core_highlight.txt`
-- optional `02_ssn/tree_analysis/itol_base_candidate_highlight.txt`
+- optional `02_ssn/tree_analysis/itol_extra_unvalidated_stars.txt`
 - optional `02_ssn/tree_analysis/itol_core_short_name_text.txt`
 - optional `02_ssn/tree_analysis/itol_soluprot_gradient_symbols.txt`
 - optional `02_ssn/tree_analysis/annotations/base_xlsx/base_itol_annotation_summary.csv`
@@ -52,8 +52,8 @@ Seed provenance stage:
 Manual base.xlsx iTOL curation:
 
 - Keep candidate flags outside the protected tree visualizer; use `scripts/build_tree_annotations.py` or `scripts/annotate_base_xlsx_itol.py`.
-- `备注` containing `漏补候选` becomes the red-circle field in `itol_base_candidate_highlight.txt`.
-- `备注` containing `额外候选` becomes the yellow-star field in `itol_base_candidate_highlight.txt`.
+- `备注` containing `漏补候选` is merged directly into `itol_core_highlight.txt`.
+- `备注` containing `额外候选` becomes a large yellow star with a black border in `itol_extra_unvalidated_stars.txt`.
 - Core short-name text labels come from `酶名称`; if parentheses are present, use the last half-width or full-width parenthesized term only.
 - Upload-ready optional iTOL files should sit directly in `tree_analysis/`; audit/intermediate files should sit under `tree_analysis/annotations/`.
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,43 @@ def copy_if_exists(src: Path, dst: Path) -> Optional[Path]:
     shutil.copy2(src, dst)
     print(f"Copied {src} -> {dst}")
     return dst
+
+
+def merge_missed_candidates_into_core(core_path: Path, summary_path: Path) -> List[str]:
+    if not core_path.exists() or not summary_path.exists():
+        return []
+
+    with core_path.open("r", encoding="utf-8", errors="replace") as handle:
+        lines = handle.read().splitlines()
+    try:
+        data_idx = lines.index("DATA")
+    except ValueError:
+        raise ValueError(f"Missing DATA line in {core_path}")
+
+    existing = set()
+    for line in lines[data_idx + 1 :]:
+        if not line.strip() or line.startswith("#"):
+            continue
+        existing.add(line.split("\t", 1)[0])
+
+    additions: List[str] = []
+    with summary_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            if row.get("annotation_kind") != "missed_candidate":
+                continue
+            if row.get("matched") != "true":
+                continue
+            node_id = row.get("node_id", "").strip()
+            if node_id and node_id not in existing:
+                additions.append(node_id)
+                existing.add(node_id)
+
+    if additions:
+        with core_path.open("a", encoding="utf-8") as handle:
+            for node_id in additions:
+                handle.write(f"{node_id}\t1\n")
+        print(f"Merged {len(additions)} missed candidates into {core_path}")
+    return additions
 
 
 def main() -> None:
@@ -54,7 +92,10 @@ def main() -> None:
             "--nodes", str(nodes),
             "--outdir", str(base_out),
         ])
-        copied = copy_if_exists(base_out / "itol_base_candidate_highlight.txt", tree_dir / "itol_base_candidate_highlight.txt")
+        merged = merge_missed_candidates_into_core(tree_dir / "itol_core_highlight.txt", base_out / "base_itol_annotation_summary.csv")
+        if merged:
+            top_level_files.append(tree_dir / "itol_core_highlight.txt")
+        copied = copy_if_exists(base_out / "itol_extra_unvalidated_stars.txt", tree_dir / "itol_extra_unvalidated_stars.txt")
         if copied:
             top_level_files.append(copied)
         copied = copy_if_exists(base_out / "itol_core_short_name_text.txt", tree_dir / "itol_core_short_name_text.txt")

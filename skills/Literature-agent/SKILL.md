@@ -78,22 +78,28 @@ python /mnt/e/Codex/skills/Literature-agent/Start-from-zotero-csv.py \
   --output /mnt/e/literature_flavin_photoenzyme \
   --schema-profile flavin-photoenzyme \
   --field "photoenzymatic field, including photoenzyme, Photoenzymology, photobiocatalysis, enzyme photocatalysis" \
-  --enzyme-feature "flavin cofactor; flavin-dependent enzymes; FAD; FMN; flavoenzyme; OYE/ERED/FAP if relevant" \
+  --enzyme-feature "flavin cofactor; flavin-dependent enzymes; FAD; FMN; flavoenzyme; OYE/ERED/FAP/FDH if relevant" \
   --reaction "new-to-nature reactions: rare or absent in biological metabolism but common or useful in chemical synthesis" \
   --goal "Use evidence-backed papers to find reported and unreported flavin-dependent enzymes with potential for new-to-nature photoenzymatic reactions; export candidates for later homolog/tree analysis." \
   --use-llm \
   --llm-scope criteria-ambiguous \
+  --resolve-other-with-llm \
   --discover \
   --expand-mode both \
   --max-depth 1 \
-  --breadth-limit 30 \
+  --breadth-limit 20 \
+  --ss-rate-limit 5 \
+  --ss-max-retries 0 \
+  --ss-search-limit 20 \
+  --ss-max-search-queries 4 \
   --target-non-other 120 \
-  --max-other 10
+  --max-other 50 \
+  --max-enzyme-seeds 100
 ```
 
-This criteria-first mode writes `criteria_spec.md`, `task_spec.md`, annotates each paper with `criteria_status` (`criteria_pass`, `criteria_borderline`, or `criteria_fail`), and exports `homolog_candidate_seeds.csv` for downstream enzyme/homolog curation. It expands obvious synonyms for the three hard anchors, including photoenzymatic/photoenzyme/Photoenzymology/photobiocatalysis and flavin/FAD/FMN/flavoenzyme/OYE/ERED/FAP. Use `--criteria-file criteria.txt` or `.json` when the reaction sentence or goal is long.
+This criteria-first mode writes `criteria_spec.md`, `task_spec.md`, annotates each paper with `criteria_status` (`criteria_pass`, `criteria_borderline`, or `criteria_fail`), and exports `homolog_candidate_seeds.csv` plus `enzyme_seed_candidates.csv` for downstream enzyme/homolog curation. It expands obvious synonyms for the three hard anchors, including photoenzymatic/photoenzyme/Photoenzymology/photobiocatalysis and flavin/FAD/FMN/flavoenzyme/OYE/ERED/FAP/FDH. Use `--criteria-file criteria.txt` or `.json` when the reaction sentence or goal is long.
 
-Use full `--llm-scope all` only for small curated batches. For broad Zotero/discovery runs, `--llm-scope criteria-ambiguous` is the preferred low-token setting because it sends only criterion-matching ambiguous records to the LLM.
+Use full `--llm-scope all` only for small curated batches. For broad Zotero/discovery runs, `--llm-scope criteria-ambiguous` is the preferred low-token setting because it sends only criterion-matching ambiguous records to the LLM. Use `--llm-scope enzyme-family` when the only API-worthy uncertainty is whether `Other_enzyme`, `no enzyme`, or a broad `*ase` guess should be resolved into a narrower flavin enzyme family.
 
 Legacy full-prompt command:
 
@@ -188,9 +194,9 @@ Then run this skill on `/mnt/e/alpha_beta_hydrolase/hydrolase_literature_seed.cs
    - `C_photoenzyme_non_flavin`
    - `D_organic_photochemistry_no_enzyme`
    - `E_background_or_unrelated`
-7. Resolves `Other_enzyme`, `unclear`, and noisy `*ase` guesses with a second LLM pass.
+7. Resolves `Other_enzyme`, `unclear`, `no enzyme`, and noisy `*ase` guesses with a focused LLM pass when requested.
 8. For unresolved Other/unclear papers, optionally tries to fetch an introduction snippet from the DOI landing page or URL.
-9. Applies a quality filter and writes permanent blacklist memory.
+9. Applies a quality filter and writes memory. Hard rejects are blacklisted; unresolved `Other_enzyme` overflow is deferred for review, not blacklisted.
 10. Generates compact reports plus interactive HTML dashboards.
 
 ## Dashboard-First Outputs
@@ -222,6 +228,12 @@ Still generated:
 - `knowledge_report.md`
 - `gap_analysis.md`
 - `ambiguous_enzyme_review.md`
+- `deferred_enzyme_review.md`
+- `homolog_candidate_seeds.csv`
+- `enzyme_seed_candidates.csv`
+- `sequence_seed_candidates.csv`
+- `sequence_seed_review.html`
+- `enzyme_seed_candidates.fasta` when `--fetch-uniprot-seeds` finds sequences
 - `blacklisted_papers.md`
 - `discovery_summary.md`
 - `network_analysis.md`
@@ -244,11 +256,13 @@ Permanent memory lives at:
 /mnt/e/literature_expanded_llm/literature_blacklist_memory.json
 ```
 
-This JSON records both kept and blacklisted papers by DOI/title hash. On later runs:
+This JSON records kept, review-deferred, and hard-blacklisted papers by DOI/title hash. On later runs:
 
-- blacklisted records are skipped before LLM extraction
-- kept records provide prior `paper_domain` and `enzyme_family`
+- hard-blacklisted records are skipped before LLM extraction
+- kept and review-deferred records provide prior `paper_domain` and `enzyme_family`
 - quality-filter decisions are saved back to the same file
+
+Legacy records blacklisted only because of `Other_enzyme` overflow are automatically migrated to `review_deferred` and re-enter review. They should not be treated as permanent exclusions.
 
 By default it is written inside the output directory as `literature_blacklist_memory.json`. Use a different memory file only when intentionally starting a separate literature universe:
 
@@ -280,7 +294,8 @@ Rules:
 - Pure photoredox/radical chemistry can still be kept when it has enzyme-pocket migration value.
 - Pure organic synthesis with no photoredox/radical/enzyme relevance should be blacklisted.
 - False `*ase` words such as `release`, `base`, `showcase`, `disease`, and `phase` must not become enzyme families.
-- Default final quota: at least 100 non-Other useful papers if available; at most 20 Other papers.
+- For flavin work, `no enzyme` should be used only when the record clearly has no protein/enzyme system.
+- `--max-other` limits how many unresolved Other papers are prioritized in the main review set; overflow is written to `deferred_enzyme_review.md/.csv`, not to the permanent blacklist.
 
 Relevant flags:
 
@@ -324,7 +339,21 @@ For the user's flavin/photoenzyme task, use `--schema-profile flavin-photoenzyme
 - organic photochemistry papers without enzymes
 - weak background or unrelated records
 
-For handoff to homolog/tree work, review `homolog_candidate_seeds.csv` first. It contains DOI/title/year/journal, criteria hits, flavin cofactor evidence, enzyme family/name hints, reaction type, characterization evidence, and structure/PDB-like hints. Treat it as a curation table for choosing enzyme seeds; do not feed every row directly into homolog expansion without confirming UniProt/PDB/sequence evidence.
+For handoff to homolog/tree work, review `sequence_seed_review.html` first when the goal is to build a `core_fasta`. It is generated offline from `enzyme_seed_candidates.csv` plus `homolog_candidate_seeds.csv`, and separates concrete sequence-ready leads from family-only/review context. The paired `sequence_seed_candidates.csv` adds `canonical_enzyme`, `specific_enzyme_names`, `mutations_or_variants`, `organism_candidates`, organism evidence, and direct UniProt/NCBI Protein/NCBI Nucleotide/ENA query links. Use `enzyme_seed_candidates.csv` as the raw enzyme extraction table and `homolog_candidate_seeds.csv` as the paper-level evidence table.
+
+To rebuild the sequence review from an existing run without spending LLM/API calls:
+
+```bash
+conda activate md
+
+python /mnt/e/Codex/skills/Literature-agent/scripts/sequence_seed_resolver.py \
+  --enzyme-csv /mnt/e/literature_flavin_photoenzyme/enzyme_seed_candidates.csv \
+  --homolog-csv /mnt/e/literature_flavin_photoenzyme/homolog_candidate_seeds.csv \
+  --outdir /mnt/e/literature_flavin_photoenzyme \
+  --prefix sequence_seed
+```
+
+The sequence resolver does not fetch sequences by default. For protein/DNA FASTA, first review rows marked `specific_with_organism`, then follow the emitted database links or run an explicit later fetch step. This avoids wasting API calls on generic rows such as `ene-reductase`, review papers, or papers where variants are not named.
 
 ## Discovery Parameters
 
@@ -337,10 +366,14 @@ Use Semantic Scholar discovery through the main script:
 --breadth-limit 30
 --relevance-threshold 0.25
 --search-query "lipase photoredox"
+--ss-rate-limit 5
+--ss-max-retries 0
+--ss-search-limit 20
+--ss-max-search-queries 4
 --ss-api-key "$SEMANTIC_SCHOLAR_API_KEY"
 ```
 
-Semantic Scholar free tier is rate-limited. Increase `--breadth-limit` before increasing `--max-depth`; depth 2 can grow quickly.
+Semantic Scholar free tier is rate-limited and may return 429 for every search. This is independent of Kimi/LLM fast or thinking mode. The main script now defaults to no 429 retries and opens a rate-limit circuit after the first 429 so the run can continue with already collected papers. If 429 errors appear, use `--ss-max-search-queries 0` to disable supplemental keyword searches, lower `--breadth-limit`, or omit `--discover` for a seed-only criteria/LLM run. Use `--ss-api-key` when available. Increase `--breadth-limit` before increasing `--max-depth`; depth 2 can grow quickly.
 
 ## Zotero Local Linkage
 

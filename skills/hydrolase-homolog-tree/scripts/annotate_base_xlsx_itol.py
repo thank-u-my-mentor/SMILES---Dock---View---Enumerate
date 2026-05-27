@@ -3,8 +3,9 @@
 Generate iTOL annotations from the curated base.xlsx table.
 
 Rules:
-- rows whose notes contain "missed candidate" in Chinese are marked as red circles
-- rows whose notes contain "extra candidate" in Chinese are marked as yellow stars
+- rows whose notes contain "missed candidate" in Chinese are audited for merging
+  into the existing Core Sequences highlight.
+- rows whose notes contain "extra candidate" in Chinese are marked as yellow stars.
 - core/curated rows get short enzyme-name text labels, using text inside
   half-width or full-width parentheses when present.
 """
@@ -146,37 +147,45 @@ def row_kind(row: Dict[str, str]) -> str:
     return "core"
 
 
-def write_candidate_dataset(rows: List[Dict[str, str]], aliases: Dict[str, str], outpath: Path) -> List[Dict[str, str]]:
+def write_extra_star_dataset(rows: List[Dict[str, str]], aliases: Dict[str, str], outpath: Path) -> List[Dict[str, str]]:
     written: List[Dict[str, str]] = []
     with outpath.open("w", encoding="utf-8") as handle:
         handle.write("DATASET_BINARY\n")
         handle.write("SEPARATOR TAB\n")
-        handle.write("DATASET_LABEL\tBase curation candidates\n")
-        handle.write("COLOR\t#D7191C\n")
-        handle.write("FIELD_SHAPES\t2\t3\n")
-        handle.write("FIELD_COLORS\t#D7191C\t#FFD21F\n")
-        handle.write("FIELD_LABELS\tmissed_core_candidate\textra_unvalidated_candidate\n")
+        handle.write("DATASET_LABEL\tExtra unvalidated candidates\n")
+        handle.write("COLOR\t#000000\n")
+        handle.write("FIELD_SHAPES\t3\n")
+        handle.write("FIELD_COLORS\t#FFD21F\n")
+        handle.write("FIELD_LABELS\textra_unvalidated_candidate\n")
         handle.write("MARGIN\t18\n")
-        handle.write("LEGEND_TITLE\tBase.xlsx curation\n")
-        handle.write("LEGEND_SHAPES\t2\t3\n")
-        handle.write("LEGEND_COLORS\t#D7191C\t#FFD21F\n")
-        handle.write("LEGEND_LABELS\tMissed literature-backed core candidate\tExtra unvalidated candidate\n")
+        handle.write("LEGEND_TITLE\tBase.xlsx extra candidates\n")
+        handle.write("LEGEND_SHAPES\t3\n")
+        handle.write("LEGEND_COLORS\t#FFD21F\n")
+        handle.write("LEGEND_LABELS\tExtra unvalidated candidate\n")
         handle.write("DATA\n")
         for row in rows:
             kind = row_kind(row)
-            if kind == "core":
+            if kind != "extra_candidate":
                 continue
             uid = clean_accession(row.get("uniprot_id", ""))
             node_id = aliases.get(uid) or aliases.get(row.get("uniprot_id", "").strip())
             if not node_id:
                 written.append({**row, "annotation_kind": kind, "node_id": "", "matched": "false"})
                 continue
-            if kind == "missed_candidate":
-                values = "1\t0"
-            else:
-                values = "0\t1"
-            handle.write(f"{node_id}\t{values}\n")
+            handle.write(f"{node_id}\t1\n")
             written.append({**row, "annotation_kind": kind, "node_id": node_id, "matched": "true"})
+    return written
+
+
+def collect_missed_core_rows(rows: List[Dict[str, str]], aliases: Dict[str, str]) -> List[Dict[str, str]]:
+    written: List[Dict[str, str]] = []
+    for row in rows:
+        kind = row_kind(row)
+        if kind != "missed_candidate":
+            continue
+        uid = clean_accession(row.get("uniprot_id", ""))
+        node_id = aliases.get(uid) or aliases.get(row.get("uniprot_id", "").strip())
+        written.append({**row, "annotation_kind": kind, "node_id": node_id or "", "matched": "true" if node_id else "false"})
     return written
 
 
@@ -227,10 +236,11 @@ def main() -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     rows = read_xlsx_rows(Path(args.base_xlsx))
     aliases = node_aliases(read_nodes(Path(args.nodes)))
-    symbol_rows = write_candidate_dataset(rows, aliases, outdir / "itol_base_candidate_highlight.txt")
+    missed_rows = collect_missed_core_rows(rows, aliases)
+    symbol_rows = write_extra_star_dataset(rows, aliases, outdir / "itol_extra_unvalidated_stars.txt")
     text_rows = write_text_dataset(rows, aliases, outdir / "itol_core_short_name_text.txt")
-    write_summary(outdir / "base_itol_annotation_summary.csv", symbol_rows + text_rows)
-    print(f"Wrote {outdir / 'itol_base_candidate_highlight.txt'}")
+    write_summary(outdir / "base_itol_annotation_summary.csv", missed_rows + symbol_rows + text_rows)
+    print(f"Wrote {outdir / 'itol_extra_unvalidated_stars.txt'}")
     print(f"Wrote {outdir / 'itol_core_short_name_text.txt'}")
     print(f"Wrote {outdir / 'base_itol_annotation_summary.csv'}")
 

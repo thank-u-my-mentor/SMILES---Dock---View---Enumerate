@@ -192,7 +192,10 @@ KNOWN_ENZYME_FAMILIES = {
     "P450", "ERED/OYE", "FAP", "flavoprotein", "nonheme iron enzyme",
     "lipase/esterase", "alpha/beta-hydrolase", "Aldolase", "transaminase",
     "dehydrogenase", "monooxygenase", "peroxidase", "nitroreductase",
-    "halogenase", "synthase", "kinase/phosphatase", "protease", "lyase",
+    "halogenase", "flavin-dependent halogenase", "photolyase/cryptochrome",
+    "berberine bridge enzyme", "amine oxidase", "acyl-CoA dehydrogenase",
+    "D-amino acid oxidase", "glucose oxidase", "sulfide:quinone oxidoreductase",
+    "luciferase", "flavin reductase", "synthase", "kinase/phosphatase", "protease", "lyase",
     "hydrolase", "oxidase", "reductase", "engineered enzyme",
 }
 
@@ -964,6 +967,18 @@ def should_run_llm_for_paper(paper: PaperNode, base_tags: Dict[str, str], scope:
         return False
     family = tag_get(base_tags, "enzyme_family")
     domain = tag_get(base_tags, "paper_domain")
+    if scope == "enzyme-family":
+        flavin = tag_get(base_tags, "flavin_cofactor", default="")
+        text = criteria_context_for_paper(paper).lower()
+        flavin_signal = flavin in {"FAD", "FMN", "flavin unspecified"} or any(
+            k in text for k in ["flavin", "fad", "fmn", "flavoenzyme", "old yellow enzyme", "ene-reductase", "ered", "oye"]
+        )
+        return (
+            is_other_enzyme_family(family)
+            or family in {"Other_enzyme", "unclear", "no enzyme"}
+            or domain in {"", "unclear", "unrelated/blacklist"}
+            or flavin_signal
+        )
     if scope == "other-only":
         return is_other_enzyme_family(family) or family in {"Other_enzyme", "unclear"} or domain in {"", "unclear"}
     if scope == "ambiguous":
@@ -1019,9 +1034,19 @@ class LiteratureMemory:
             "paper_domain": rec.get("paper_domain", ""),
             "enzyme_family": rec.get("enzyme_family", paper.tags.get("enzyme_family", "")),
         })
+        if rec.get("status") in {"deferred", "review_deferred"}:
+            paper.tags["review_status"] = "deferred_from_memory"
+            paper.tags["review_reason"] = rec.get("reason", "")
+            return False
         if rec.get("status") == "blacklisted":
+            reason = rec.get("reason", "命中永久黑名单")
+            if "Other_enzyme超过" in reason or "Other_enzyme overflow" in reason:
+                paper.tags["review_status"] = "deferred_from_legacy_blacklist"
+                paper.tags["review_reason"] = reason
+                paper.tags["is_blacklisted"] = "false"
+                return False
             paper.tags["is_blacklisted"] = "true"
-            paper.tags["blacklist_reason"] = rec.get("reason", "命中永久黑名单")
+            paper.tags["blacklist_reason"] = reason
             return True
         return False
 
@@ -1039,8 +1064,23 @@ class LiteratureMemory:
             "paper_domain": tag_get(paper.tags, "paper_domain", default=""),
             "enzyme_family": tag_get(paper.tags, "enzyme_family", default=""),
             "topic_domain": tag_get(paper.tags, "topic_domain", default=""),
+            "review_status": paper.tags.get("review_status", ""),
             "updated_at": pd.Timestamp.now().isoformat(),
         }
+
+    def migrate_legacy_other_blacklist(self) -> int:
+        changed = 0
+        for rec in self.records.values():
+            if rec.get("status") == "blacklisted":
+                reason = str(rec.get("reason", ""))
+                if "Other_enzyme超过" in reason or "Other_enzyme overflow" in reason:
+                    rec["status"] = "review_deferred"
+                    rec["review_status"] = "deferred_legacy_other_overflow"
+                    rec["updated_at"] = pd.Timestamp.now().isoformat()
+                    changed += 1
+        if changed:
+            print(f"[Memory] Migrated {changed} legacy Other_enzyme quota blacklists to review_deferred")
+        return changed
 
 
 def load_text_cache(path: Path) -> Dict:
@@ -1211,7 +1251,7 @@ def apply_annotation_quality_filter(
     target_non_other: int = 100,
     max_other: int = 20,
 ) -> Tuple[List[PaperNode], List[PaperNode]]:
-    """Filter papers for annotation: keep non-other preferentially, cap Other_enzyme."""
+    """Filter hard rejects while keeping Other_enzyme overflow as review-deferred, not blacklist."""
     kept_non_other: List[PaperNode] = []
     other_candidates: List[PaperNode] = []
     blacklisted: List[PaperNode] = []
@@ -1233,11 +1273,11 @@ def apply_annotation_quality_filter(
     other_candidates.sort(key=rank_paper_for_quota, reverse=True)
     kept_other = other_candidates[:max_other]
     for paper in other_candidates[max_other:]:
-        paper.tags["is_blacklisted"] = "true"
-        paper.tags["blacklist_reason"] = f"Other_enzyme超过上限 {max_other}，让位给可注释文献"
-        blacklisted.append(paper)
+        paper.tags["review_status"] = "deferred_other_overflow"
+        paper.tags["review_reason"] = f"Other_enzyme超过优先展示上限 {max_other}，未拉黑；需要酶家族精查"
+        paper.tags["manual_review_priority"] = "high"
 
-    kept = kept_non_other + kept_other
+    kept = kept_non_other + kept_other + other_candidates[max_other:]
     if len(kept_non_other) < target_non_other:
         print(
             f"[Quality] 非Other可注释文献 {len(kept_non_other)} 篇，低于目标 {target_non_other}。"
@@ -1245,7 +1285,8 @@ def apply_annotation_quality_filter(
         )
     print(
         f"[Quality] 保留 {len(kept)} 篇：非Other {len(kept_non_other)}，"
-        f"Other {len(kept_other)}/{len(other_candidates)}，黑名单 {len(blacklisted)}。"
+        f"Other优先 {len(kept_other)}/{len(other_candidates)}，"
+        f"Other待精查 {max(0, len(other_candidates) - len(kept_other))}，黑名单 {len(blacklisted)}。"
     )
     return kept, blacklisted
 
@@ -1274,6 +1315,57 @@ def write_blacklist_report(blacklisted: List[PaperNode], output_dir: Path):
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
     print(f"[Quality] 黑名单报告已保存: {path}")
+
+
+def write_deferred_review_report(papers: List[PaperNode], output_dir: Path):
+    deferred = [p for p in papers if p.tags.get("review_status", "") == "deferred_other_overflow"]
+    if not deferred:
+        return
+    deferred.sort(key=rank_paper_for_quota, reverse=True)
+    rows = []
+    lines = [
+        "# Deferred Enzyme-Family Review",
+        "",
+        "These papers were not blacklisted. They exceeded the current Other_enzyme display quota and need enzyme-family resolution.",
+        "",
+    ]
+    for paper in deferred:
+        row = {
+            "title": paper.title,
+            "doi": normalize_doi_for_filter(paper.doi),
+            "year": paper.year,
+            "journal": paper.journal,
+            "review_reason": paper.tags.get("review_reason", ""),
+            "enzyme_family": tag_get(paper.tags, "enzyme_family"),
+            "paper_domain": tag_get(paper.tags, "paper_domain"),
+            "flavin_cofactor": tag_get(paper.tags, "flavin_cofactor", default=""),
+            "criteria_status": paper.tags.get("criteria_status", ""),
+            "criteria_score": paper.tags.get("criteria_score", ""),
+            "search_track": tag_get(paper.tags, "search_track", default=""),
+            "candidate_for_photoenzyme_repurposing": tag_get(paper.tags, "candidate_for_photoenzyme_repurposing", default=""),
+            "relevance_score": paper.tags.get("relevance_score", ""),
+            "citation_count": paper.tags.get("citation_count", ""),
+            "abstract": paper.abstract,
+        }
+        rows.append(row)
+        doi = row["doi"] or "missing"
+        lines.extend([
+            f"## {paper.title}",
+            "",
+            f"- DOI: {doi}",
+            f"- Year: {paper.year}",
+            f"- Journal: {paper.journal}",
+            f"- Current family: {row['enzyme_family']}",
+            f"- Reason: {row['review_reason']}",
+            f"- Flavin: {row['flavin_cofactor']}",
+            f"- Criteria: {row['criteria_status']} {row['criteria_score']}",
+            "",
+        ])
+    md_path = output_dir / "deferred_enzyme_review.md"
+    csv_path = output_dir / "deferred_enzyme_review.csv"
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    pd.DataFrame(rows).to_csv(csv_path, index=False, encoding="utf-8-sig")
+    print(f"[Quality] Deferred enzyme review saved: {md_path} / {csv_path}")
 
 
 def write_zotero_overlap_report(
@@ -1645,6 +1737,255 @@ def export_homolog_candidate_seeds(papers: List[PaperNode], output_dir: Path) ->
     pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8-sig")
     print(f"[Criteria] Homolog candidate seed table saved: {path} ({len(rows)} rows)")
     return path
+
+
+def extract_pdb_ids(text: str) -> List[str]:
+    ids = []
+    for match in re.findall(r"\b[0-9][A-Za-z0-9]{3}\b", text or ""):
+        if any(c.isalpha() for c in match):
+            ids.append(match.upper())
+    return dedupe_preserve_order(ids)
+
+
+def extract_uniprot_accessions(text: str) -> List[str]:
+    pattern = r"\b(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9](?:-[0-9]+)?|[A-Z0-9]{10})\b"
+    return dedupe_preserve_order(re.findall(pattern, text or ""))
+
+
+def clean_enzyme_candidate_name(name: str) -> str:
+    value = re.sub(r"\s+", " ", str(name or "")).strip(" .,:;()[]")
+    value = re.sub(r"^(engineered|direct|visible-light|photoexcited|mutant|variant)\s+", "", value, flags=re.I)
+    value = re.sub(r"\s+(variants?|mutants?)$", "", value, flags=re.I)
+    false_names = {
+        "engineered", "centered", "direct", "visible", "protein", "enzyme",
+        "flavin", "cofactor", "radical",
+    }
+    if not value or value.lower() in false_names:
+        return ""
+    if len(value) < 4:
+        return ""
+    enzyme_signal = any(
+        token in value.lower()
+        for token in [
+            "ase", "enzyme", "reductase", "oxidase", "halogenase", "monooxygenase",
+            "dehydrogenase", "photodecarboxylase", "photolyase", "cryptochrome",
+            "nitroreductase", "fap", "fdh", "ered", "oye", "fmo", "bbe",
+        ]
+    )
+    if not enzyme_signal:
+        return ""
+    return value
+
+
+def extract_enzyme_name_candidates(paper: PaperNode) -> List[str]:
+    names = []
+    explicit = tag_get(paper.tags, "enzyme_name_or_target", default="")
+    if explicit and explicit not in {"unclear", "N/A"}:
+        for part in re.split(r"[|;,/]+", explicit):
+            part = clean_enzyme_candidate_name(part)
+            if part and part.lower() not in {"unclear", "unknown", "n/a"}:
+                names.append(part)
+    text = f"{paper.title}. {paper.abstract}"
+    phrase_patterns = [
+        r"\b(?:engineered\s+)?(?:flavin-dependent|flavin dependent)\s+[A-Za-z -]{3,45}ases?\b",
+        r"\b(?:fatty acid photodecarboxylase|photodecarboxylase|ene-reductase|ene reductase|old yellow enzyme|flavin-dependent halogenase|flavin dependent halogenase|photolyase|cryptochrome|nitroreductase|berberine bridge enzyme|flavin monooxygenase|flavin reductase|glucose oxidase|D-amino acid oxidase)\b",
+        r"\b(?:[A-Z][A-Za-z0-9]{0,8})?(?:FAP|FDH|ERED|OYE)\b",
+    ]
+    for pattern in phrase_patterns:
+        flags = 0 if "FAP|FDH|ERED|OYE" in pattern else re.I
+        for match in re.findall(pattern, text, flags=flags):
+            cleaned = clean_enzyme_candidate_name(match)
+            if cleaned:
+                names.append(cleaned)
+    return dedupe_preserve_order(names)[:8]
+
+
+def make_uniprot_query(name: str, family: str, paper: PaperNode) -> str:
+    terms = []
+    for value in [name, family]:
+        value = str(value or "").strip()
+        if value and value not in {"Other_enzyme", "unclear", "no enzyme", "N/A"}:
+            terms.append(value)
+    if paper.title:
+        source_match = re.search(r"\b(?:from|of|in)\s+([A-Z][a-z]+(?:\s+[a-z]+){0,2})", paper.title)
+        if source_match:
+            terms.append(source_match.group(1))
+    base = " ".join(dedupe_preserve_order(terms))
+    if not base:
+        base = paper.title[:80]
+    return f'({base}) AND (flavin OR FAD OR FMN OR flavoenzyme)'
+
+
+def fetch_uniprot_candidates(query: str, size: int = 3, timeout: float = 25.0) -> List[Dict[str, str]]:
+    params = {
+        "query": query,
+        "format": "json",
+        "size": size,
+        "fields": "accession,id,protein_name,organism_name,sequence,length,xref_pdb,reviewed",
+    }
+    try:
+        resp = requests.get("https://rest.uniprot.org/uniprotkb/search", params=params, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"[UniProt] Query failed for {query[:80]}: {e}")
+        return []
+    results = []
+    for item in data.get("results", []):
+        seq_obj = item.get("sequence") or {}
+        protein = item.get("proteinDescription", {})
+        recommended = protein.get("recommendedName", {}).get("fullName", {}).get("value", "")
+        if not recommended:
+            recommended = protein.get("submissionNames", [{}])[0].get("fullName", {}).get("value", "")
+        pdb_ids = []
+        for xref in item.get("uniProtKBCrossReferences", []) or []:
+            if xref.get("database") == "PDB" and xref.get("id"):
+                pdb_ids.append(xref["id"])
+        results.append({
+            "uniprot_id": item.get("primaryAccession", ""),
+            "uniprot_entry": item.get("uniProtkbId", ""),
+            "protein_name": recommended,
+            "organism": (item.get("organism") or {}).get("scientificName", ""),
+            "reviewed": str(item.get("entryType", "")),
+            "sequence_length": seq_obj.get("length", ""),
+            "sequence": seq_obj.get("value", ""),
+            "pdb_ids": " | ".join(dedupe_preserve_order(pdb_ids)),
+        })
+    return results
+
+
+def export_enzyme_seed_candidates(
+    papers: List[PaperNode],
+    output_dir: Path,
+    fetch_uniprot: bool = False,
+    max_seeds: int = 100,
+    uniprot_per_seed: int = 2,
+) -> Tuple[Path, Optional[Path]]:
+    rows = []
+    fasta_records = []
+    for paper in sorted(papers, key=rank_paper_for_quota, reverse=True):
+        family = tag_get(paper.tags, "enzyme_family", default="")
+        if family in {"", "N/A", "no enzyme", "Other_enzyme", "unclear"}:
+            continue
+        flavin = tag_get(paper.tags, "flavin_cofactor", default="")
+        track = tag_get(paper.tags, "search_track", default="")
+        candidate_rank = tag_get(paper.tags, "candidate_for_photoenzyme_repurposing", default="")
+        evidence = tag_get(paper.tags, "characterized_enzyme_evidence", default="")
+        text = f"{paper.title} {paper.abstract} {paper.tags.get('metadata_keywords', '')}"
+        if not (
+            flavin in {"FAD", "FMN", "flavin unspecified"}
+            or "flavin" in text.lower()
+            or track in {"A_used_flavin_photoenzyme_new_to_nature", "B_characterized_flavin_enzyme_not_photoenzymatic"}
+            or candidate_rank in {"high", "medium"}
+        ):
+            continue
+        names = extract_enzyme_name_candidates(paper) or [family]
+        pdb_ids = extract_pdb_ids(text)
+        accessions = extract_uniprot_accessions(text)
+        for name in names:
+            base_row = {
+                "seed_priority": candidate_rank or tag_get(paper.tags, "manual_review_priority", default=""),
+                "enzyme_name": name,
+                "enzyme_family": family,
+                "uniprot_id": " | ".join(accessions),
+                "pdb_ids": " | ".join(pdb_ids),
+                "doi": normalize_doi_for_filter(paper.doi),
+                "title": paper.title,
+                "year": paper.year,
+                "journal": paper.journal,
+                "search_track": track,
+                "flavin_cofactor": flavin,
+                "reaction_type": tag_get(paper.tags, "reaction_type", default=""),
+                "new_to_nature_reaction": tag_get(paper.tags, "new_to_nature_reaction", default=""),
+                "characterized_enzyme_evidence": evidence,
+                "structure_similarity_hint": tag_get(paper.tags, "structure_similarity_hint", default=""),
+                "criteria_status": paper.tags.get("criteria_status", ""),
+                "manual_review_priority": tag_get(paper.tags, "manual_review_priority", default=""),
+                "evidence_summary": paper.abstract[:700],
+                "uniprot_query": make_uniprot_query(name, family, paper),
+                "sequence_source": "",
+                "sequence": "",
+            }
+            rows.append(base_row)
+            if len(rows) >= max_seeds and not fetch_uniprot:
+                break
+        if len(rows) >= max_seeds and not fetch_uniprot:
+            break
+
+    if fetch_uniprot:
+        expanded_rows = []
+        for row in rows[:max_seeds]:
+            hits = fetch_uniprot_candidates(row["uniprot_query"], size=uniprot_per_seed)
+            if not hits:
+                expanded_rows.append(row)
+                continue
+            for hit in hits:
+                merged = dict(row)
+                merged.update({
+                    "uniprot_id": hit["uniprot_id"],
+                    "uniprot_entry": hit["uniprot_entry"],
+                    "uniprot_protein_name": hit["protein_name"],
+                    "organism": hit["organism"],
+                    "reviewed": hit["reviewed"],
+                    "sequence_length": hit["sequence_length"],
+                    "pdb_ids": hit["pdb_ids"] or row["pdb_ids"],
+                    "sequence_source": "UniProt REST search",
+                    "sequence": hit["sequence"],
+                })
+                expanded_rows.append(merged)
+                if hit["sequence"]:
+                    header = "|".join(
+                        [
+                            hit["uniprot_id"],
+                            re.sub(r"\s+", "_", hit["protein_name"] or row["enzyme_name"])[:60],
+                            f"doi={row['doi'] or 'NA'}",
+                            f"family={row['enzyme_family'].replace(' ', '_')}",
+                        ]
+                    )
+                    fasta_records.append(f">{header}\n{hit['sequence']}")
+        rows = expanded_rows
+
+    rows = rows[: max_seeds if not fetch_uniprot else max(max_seeds, len(rows))]
+    csv_path = output_dir / "enzyme_seed_candidates.csv"
+    pd.DataFrame(rows).to_csv(csv_path, index=False, encoding="utf-8-sig")
+    fasta_path = None
+    if fasta_records:
+        fasta_path = output_dir / "enzyme_seed_candidates.fasta"
+        fasta_path.write_text("\n".join(fasta_records) + "\n", encoding="utf-8")
+    print(f"[Seeds] Enzyme seed candidate table saved: {csv_path} ({len(rows)} rows)")
+    if fasta_path:
+        print(f"[Seeds] UniProt FASTA saved: {fasta_path} ({len(fasta_records)} sequences)")
+    elif fetch_uniprot:
+        print("[Seeds] UniProt FASTA not written because no sequences were resolved")
+    return csv_path, fasta_path
+
+
+def export_sequence_seed_review(output_dir: Path) -> Optional[Path]:
+    """Run the offline sequence seed resolver when candidate CSVs are available."""
+    script_path = Path(__file__).resolve().parent / "scripts" / "sequence_seed_resolver.py"
+    enzyme_csv = output_dir / "enzyme_seed_candidates.csv"
+    homolog_csv = output_dir / "homolog_candidate_seeds.csv"
+    if not script_path.exists() or not enzyme_csv.exists():
+        return None
+    import subprocess
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--enzyme-csv",
+        str(enzyme_csv),
+        "--outdir",
+        str(output_dir),
+        "--prefix",
+        "sequence_seed",
+    ]
+    if homolog_csv.exists():
+        cmd.extend(["--homolog-csv", str(homolog_csv)])
+    try:
+        subprocess.run(cmd, check=True)
+    except Exception as e:
+        print(f"[SequenceSeed] Review export failed: {e}")
+        return None
+    return output_dir / "sequence_seed_review.html"
 
 
 def build_extraction_context(paper: PaperNode) -> str:
@@ -2135,6 +2476,61 @@ Introduction片段（若抓取成功）: {introduction}
             return merge_with_fallback(result, fallback_tags, self.schema)
         except Exception as e:
             print(f"  Other_enzyme二次精查失败: {e}")
+            return fallback_tags
+
+    def resolve_flavin_enzyme_family(self, paper: "PaperNode") -> Dict[str, str]:
+        """Focused low-token resolver for flavin enzyme family and seed usefulness."""
+        fallback_tags = fallback_extract(paper.title, paper.abstract, self.schema)
+        introduction = paper.tags.get("introduction_snippet", "")
+        prompt = f"""You are resolving enzyme identity for a flavin/photoenzymatic literature triage table.
+
+Return only JSON. Do not blacklist papers just because the enzyme family is unclear.
+
+Rules:
+1. If the paper mentions flavin, FAD, FMN, flavoenzyme, OYE, ERED, FAP, FDH, photolyase, cryptochrome, nitroreductase, oxidase, reductase, dehydrogenase, monooxygenase, halogenase, or berberine bridge enzyme, assume an enzyme/protein is plausible unless the abstract clearly says it is small-molecule flavin photocatalysis with no enzyme.
+2. Give the narrowest enzyme_family supported by title/abstract: ERED/OYE, flavin-dependent halogenase, FAP, photolyase/cryptochrome, flavin monooxygenase, flavin reductase/dehydrogenase, nitroreductase, berberine bridge enzyme, flavoenzyme oxidase, dehydrogenase, oxidase, reductase, or other specific family.
+3. Use "Other_enzyme" only when no narrower family is supportable. Use "no enzyme" only when clearly no protein/enzyme system is involved.
+4. candidate_for_photoenzyme_repurposing should be high/medium for characterized flavin enzymes with structure, PDB, purified enzyme, kinetics, activity assay, substrate scope, or mutagenesis evidence, especially if not already a photoenzymatic new-to-nature application.
+5. is_blacklisted must be false unless the paper is clearly unrelated or has no useful chemical/enzyme evidence.
+
+Title: {paper.title}
+Journal: {paper.journal}
+Year: {paper.year}
+DOI: {paper.doi}
+API keywords/subjects/concepts: {paper.tags.get('metadata_keywords', '')}
+Current tags: enzyme_family={tag_get(paper.tags, 'enzyme_family')}; flavin={tag_get(paper.tags, 'flavin_cofactor', default='')}; track={tag_get(paper.tags, 'search_track', default='')}
+Abstract: {paper.abstract}
+Introduction snippet: {introduction}
+
+JSON schema:
+{{
+  "enzyme_family": "...",
+  "enzyme_name_or_target": "specific enzyme/protein name, accession/PDB clue, or unclear",
+  "flavin_cofactor": "FAD|FMN|flavin unspecified|no flavin|unclear",
+  "paper_domain": "flavin photoenzymatic application|characterized flavin enzyme non-photo|photoenzymatic non-flavin|organic photoredox/radical no-enzyme|unrelated/blacklist",
+  "photoenzymatic_application_status": "applied to new-to-nature reaction|native/known enzymology only|candidate not yet photoenzymatic|no enzyme|unclear",
+  "new_to_nature_reaction": "true|false|unclear",
+  "characterized_enzyme_evidence": "purified enzyme kinetics|activity assay only|structure only|genome annotation only|no enzyme evidence|unclear",
+  "candidate_for_photoenzyme_repurposing": "high|medium|low|no",
+  "structure_similarity_hint": "same fold/cofactor pocket|homolog of applied enzyme|similar substrate pocket|PDB available|only sequence annotation|unclear",
+  "manual_review_priority": "high|medium|low",
+  "is_blacklisted": "true|false",
+  "blacklist_reason": ""
+}}"""
+        try:
+            result = self._chat_json(prompt, max_tokens=min(1600, self.config["max_tokens"]))
+            result["enzyme_family"] = normalize_enzyme_family(
+                result.get("enzyme_family", ""),
+                paper.title,
+                paper.abstract,
+            )
+            if str(result.get("is_blacklisted", "")).lower() == "true" and is_other_enzyme_family(result.get("enzyme_family", "")):
+                result["is_blacklisted"] = "false"
+                result["blacklist_reason"] = ""
+                result["review_status"] = "needs_enzyme_family_review"
+            return merge_with_fallback(result, fallback_tags, self.schema)
+        except Exception as e:
+            print(f"  Flavin enzyme family resolver failed: {e}")
             return fallback_tags
 
 
@@ -2805,6 +3201,9 @@ def main():
     parser.add_argument('--goal', action='append', help='最终目标；用于任务说明、排序和人工复核，不作为必须直接命中的短关键词')
     parser.add_argument('--criteria-action', choices=['annotate', 'filter', 'llm-gate'], default='llm-gate', help='criteria处理方式：只标注、过滤掉fail、或仅用于减少LLM调用')
     parser.add_argument('--no-export-homolog-seeds', action='store_true', help='不导出homolog_candidate_seeds.csv')
+    parser.add_argument('--fetch-uniprot-seeds', action='store_true', help='为enzyme_seed_candidates.csv候选酶查询UniProt并导出FASTA；需要网络')
+    parser.add_argument('--max-enzyme-seeds', type=int, default=100, help='最多导出多少个enzyme seed候选')
+    parser.add_argument('--uniprot-per-seed', type=int, default=2, help='每个候选酶名最多保留多少个UniProt命中')
 
     # Discovery 扩展参数
     parser.add_argument('--discover', action='store_true', help='启用 Semantic Scholar 文献发现与引用网络扩展')
@@ -2814,6 +3213,11 @@ def main():
     parser.add_argument('--breadth-limit', type=int, default=20, help='每篇种子文献最多扩展多少邻居')
     parser.add_argument('--relevance-threshold', type=float, default=0.25, help='相关性阈值（0-1），低于此值的发现文献会被过滤')
     parser.add_argument('--search-query', action='append', help='额外关键词搜索查询（可多次使用）')
+    parser.add_argument('--ss-rate-limit', type=float, default=3.0, help='Semantic Scholar request interval in seconds')
+    parser.add_argument('--ss-max-retries', type=int, default=0, help='Semantic Scholar 429 retry count; default 0 avoids long waits')
+    parser.add_argument('--ss-search-limit', type=int, default=25, help='每条Semantic Scholar关键词搜索最多取多少篇；降低可减少429')
+    parser.add_argument('--ss-max-search-queries', type=int, default=4, help='最多执行多少条Semantic Scholar关键词搜索；0=不执行补充关键词搜索')
+    parser.add_argument('--ss-continue-after-429', action='store_true', help='429后仍继续后续Semantic Scholar请求；默认首次429即停止SS请求')
     parser.add_argument('--export-citation-network', action='store_true', help='导出引用网络为 GEXF（Gephi）和边列表 CSV')
     parser.add_argument('--export-cluster-md', action='store_true', help='额外导出所有cluster_*.md文献卡片；默认只用HTML看板浏览')
     parser.add_argument('--no-dashboard', action='store_true', help='不生成literature_dashboard.html')
@@ -2828,7 +3232,7 @@ def main():
     parser.add_argument('--metadata-cache', help='Crossref/OpenAlex元数据缓存JSON路径；默认写入输出目录/literature_metadata_cache.json')
     parser.add_argument('--no-external-metadata', action='store_true', help='禁用Crossref/OpenAlex关键词/摘要补充')
     parser.add_argument('--zotero-sqlite', help='可选：Zotero本地zotero.sqlite路径，用于标记already_in_zotero')
-    parser.add_argument('--llm-scope', choices=['all', 'ambiguous', 'other-only', 'criteria', 'criteria-ambiguous'], default='all', help='LLM处理范围；criteria-ambiguous先按硬指标筛，再只精查模糊项')
+    parser.add_argument('--llm-scope', choices=['all', 'ambiguous', 'other-only', 'enzyme-family', 'criteria', 'criteria-ambiguous'], default='all', help='LLM处理范围；enzyme-family只澄清flavin/Other/no-enzyme家族；criteria-ambiguous先按硬指标筛，再只精查模糊项')
     parser.add_argument('--enable-kimi-thinking', action='store_true', help='启用Kimi K2 thinking；默认关闭以避免抽取任务超时')
     args = parser.parse_args()
     
@@ -2860,6 +3264,9 @@ def main():
     write_task_spec(output_dir, args.schema_profile, task_prompt, args.search_query)
     write_criteria_spec(output_dir, criteria, args.search_query)
     memory = LiteratureMemory(Path(args.blacklist_memory))
+    memory_migrated = memory.migrate_legacy_other_blacklist()
+    if memory_migrated:
+        memory.save()
     
     # 1. 导入
     print("=" * 60)
@@ -2898,7 +3305,9 @@ def main():
 
             client = SemanticScholarClient(
                 api_key=args.ss_api_key,
-                rate_limit_delay=1.0,
+                rate_limit_delay=args.ss_rate_limit,
+                max_retries=args.ss_max_retries,
+                stop_on_rate_limit=not args.ss_continue_after_429,
             )
             discovery = LiteratureDiscovery(
                 client,
@@ -2915,17 +3324,31 @@ def main():
             )
 
             # 额外关键词搜索
-            if args.search_query:
-                for q in args.search_query:
+            if args.search_query and args.ss_max_search_queries != 0:
+                search_queries = args.search_query
+                if args.ss_max_search_queries > 0:
+                    search_queries = args.search_query[:args.ss_max_search_queries]
+                    skipped_queries = len(args.search_query) - len(search_queries)
+                    if skipped_queries > 0:
+                        print(f"[Discovery] Skipping {skipped_queries} extra keyword searches due to --ss-max-search-queries={args.ss_max_search_queries}")
+                for q in search_queries:
+                    if getattr(client, "rate_limit_stopped", False):
+                        print("[Discovery] Semantic Scholar rate-limit circuit is open; skipping remaining keyword searches.")
+                        break
                     print(f"[Discovery] 执行补充搜索: {q}")
-                    discovery.search(q, limit=50)
+                    discovery.search(q, limit=args.ss_search_limit)
+            elif args.search_query and args.ss_max_search_queries == 0:
+                print("[Discovery] Supplemental Semantic Scholar keyword searches disabled by --ss-max-search-queries=0")
 
             # 构建引用网络
             citation_analyzer = CitationNetworkAnalyzer()
             citation_analyzer.build(discovery)
 
             # 补充种子的真实引用数（否则种子全显示 0）
-            citation_analyzer.enrich_seed_citations(discovery, client)
+            if getattr(client, "rate_limit_stopped", False):
+                print("[Network] Skipping seed citation enrichment because Semantic Scholar is rate-limited.")
+            else:
+                citation_analyzer.enrich_seed_citations(discovery, client)
 
             # 打印网络统计
             stats = citation_analyzer.network_stats()
@@ -3047,7 +3470,11 @@ def main():
             for i, p in enumerate(llm_candidates, 1):
                 print(f"  [{i}/{len(llm_candidates)}] 提取: {p.get_display_title(50)}")
                 discovery_tags = dict(p.tags)
-                p.tags = {**discovery_tags, **extractor.extract(p.title, build_extraction_context(p), p.journal)}
+                if args.llm_scope == "enzyme-family":
+                    extracted = extractor.resolve_flavin_enzyme_family(p)
+                else:
+                    extracted = extractor.extract(p.title, build_extraction_context(p), p.journal)
+                p.tags = {**discovery_tags, **extracted}
                 if criteria.enabled():
                     apply_research_criteria_to_paper(p, criteria)
                 time.sleep(0.5)  # 避免rate limit
@@ -3068,7 +3495,10 @@ def main():
                         if intro:
                             p.tags["introduction_snippet"] = intro
                     discovery_tags = dict(p.tags)
-                    refined = extractor.resolve_other_enzyme(p)
+                    if args.schema_profile == "flavin-photoenzyme":
+                        refined = extractor.resolve_flavin_enzyme_family(p)
+                    else:
+                        refined = extractor.resolve_other_enzyme(p)
                     p.tags = {**discovery_tags, **refined}
                     if criteria.enabled():
                         apply_research_criteria_to_paper(p, criteria)
@@ -3099,10 +3529,19 @@ def main():
             memory.remember(paper, "blacklisted", paper.tags.get("blacklist_reason", ""))
         memory.save()
         write_blacklist_report(blacklisted_papers, output_dir)
+        write_deferred_review_report(papers, output_dir)
     annotate_zotero_status(papers, zotero_seed_index, zotero_library_index)
     write_zotero_overlap_report(papers, zotero_seed_index, zotero_library_index, output_dir)
     if not args.no_export_homolog_seeds:
         export_homolog_candidate_seeds(papers, output_dir)
+        export_enzyme_seed_candidates(
+            papers,
+            output_dir,
+            fetch_uniprot=args.fetch_uniprot_seeds,
+            max_seeds=args.max_enzyme_seeds,
+            uniprot_per_seed=args.uniprot_per_seed,
+        )
+        export_sequence_seed_review(output_dir)
 
     # 3. 构建知识网络
     print("\n" + "=" * 60)
@@ -3172,6 +3611,17 @@ def _detect_enzyme_family(text: str) -> str:
         (['p450', 'cytochrome p450'], 'P450'),
         (['ered', 'ene-reductase', 'old yellow enzyme', 'oye', 'ene reductase'], 'ERED/OYE'),
         (['fap', 'fatty acid photodecarboxylase', 'photodecarboxylase', 'cvfap'], 'FAP'),
+        (['flavin-dependent halogenase', 'flavin dependent halogenase', 'fdh ', 'fdhs'], 'flavin-dependent halogenase'),
+        (['photolyase', 'cryptochrome'], 'photolyase/cryptochrome'),
+        (['berberine bridge enzyme', 'bbe'], 'berberine bridge enzyme'),
+        (['flavin monooxygenase', 'flavin-containing monooxygenase', 'fmo'], 'monooxygenase'),
+        (['flavin reductase'], 'flavin reductase'),
+        (['acyl-coa dehydrogenase', 'acyl coa dehydrogenase'], 'acyl-CoA dehydrogenase'),
+        (['d-amino acid oxidase', 'd amino acid oxidase', 'daao'], 'D-amino acid oxidase'),
+        (['glucose oxidase', 'gox'], 'glucose oxidase'),
+        (['amine oxidase'], 'amine oxidase'),
+        (['sulfide:quinone oxidoreductase', 'sulfide quinone oxidoreductase', 'sqr'], 'sulfide:quinone oxidoreductase'),
+        (['luciferase'], 'luciferase'),
         (['aldolase', 'class i aldolase', 'class ii aldolase'], 'Aldolase'),
         (['lipase', 'esterase', 'triacylglycerol lipase'], 'lipase/esterase'),
         (['transaminase', 'aminotransferase'], 'transaminase'),
@@ -3232,7 +3682,11 @@ def fallback_extract(title: str, abstract: str, schema: Optional[Dict[str, str]]
             tags['enzyme_category'] = '无酶小分子光催化' if any(k in text for k in ['photocatalysis', 'photoredox']) else 'unclear'
     
     # ========== 反应类型 ==========
-    if 'decarboxyl' in text or 'decarboxylation' in text:
+    if any(k in text for k in ['semipinacol', 'c-c bond formation', 'c-c bond construction', 'carbon-carbon bond']):
+        rt = 'C-C bond formation'
+    elif 'azidooxygenation' in text:
+        rt = 'C-N bond formation'
+    elif 'decarboxyl' in text or 'decarboxylation' in text:
         rt = 'decarboxylative coupling' if 'photoenzymatic_status' in schema else 'decarboxylative_coupling'
     elif 'arylat' in text or 'c-h arylation' in text or 'c(sp3)-h arylation' in text:
         rt = 'arylation' if 'photoenzymatic_status' in schema else 'C-H_arylation'
@@ -3492,11 +3946,19 @@ def fallback_extract(title: str, abstract: str, schema: Optional[Dict[str, str]]
         else:
             tags['topic_domain'] = 'other'
 
+    flavin_enzyme_family_signal = enzyme_family not in {'no enzyme', 'Other_enzyme'} or any(k in text for k in [
+        'ene-reductase', 'ene reductase', 'ered', 'old yellow enzyme', 'oye',
+        'fatty acid photodecarboxylase', 'photodecarboxylase', 'fap',
+        'flavin-dependent halogenase', 'flavin dependent halogenase', 'fdh',
+        'flavin monooxygenase', 'nitroreductase', 'flavin reductase',
+        'flavoenzyme', 'oxidase', 'reductase', 'dehydrogenase', 'halogenase',
+    ])
+
     if 'paper_domain' in schema:
         has_enzyme_signal = any(k in text for k in [
             'photoenzym', 'photobiocatal', 'enzyme', 'enzymatic', 'biocatal',
             'active site', 'protein', 'flavoenzyme',
-        ]) or enzyme_family not in {'no enzyme', 'Other_enzyme'}
+        ]) or flavin_enzyme_family_signal
         has_photo_radical_signal = any(k in text for k in [
             'photoredox', 'visible light', 'photoinduced', 'photocatalysis',
             'radical', 'minisci', 'giese', 'energy transfer', 'hat',
@@ -3509,7 +3971,7 @@ def fallback_extract(title: str, abstract: str, schema: Optional[Dict[str, str]]
             tags['paper_domain'] = 'photoenzymatic/enzymatic'
         elif has_enzyme_signal:
             tags['paper_domain'] = 'enzymatic non-photo' if not has_photo_radical_signal else 'photoenzymatic/enzymatic'
-        elif has_photo_radical_signal:
+        elif has_photo_radical_signal and not flavin_enzyme_family_signal:
             tags['paper_domain'] = 'organic photoredox/radical no-enzyme'
         elif has_organic_synthesis_signal:
             tags['paper_domain'] = 'organic synthesis no-enzyme'
@@ -3519,16 +3981,27 @@ def fallback_extract(title: str, abstract: str, schema: Optional[Dict[str, str]]
     if 'photoenzymatic_application_status' in schema:
         has_flavin = tags.get('flavin_cofactor') in {'FAD', 'FMN', 'flavin unspecified'} or any(k in text for k in ['flavin', 'fad', 'fmn', 'flavoenzyme'])
         has_photoenzyme = any(k in text for k in ['photoenzym', 'photobiocatal', 'light-driven enzym', 'photoinduced enzym'])
-        has_new_to_nature = any(k in text for k in ['new-to-nature', 'non-natural', 'unnatural reaction', 'abiological', 'promiscuous radical'])
-        has_characterized = any(k in text for k in ['purified', 'kinetic', 'kcat', 'km ', 'substrate scope', 'crystal structure', 'pdb', 'activity assay', 'enzyme assay'])
+        has_new_to_nature = any(k in text for k in [
+            'new-to-nature', 'new to nature', 'new-to-nature biocatalysis',
+            'non-natural', 'non natural', 'nonnatural', 'unnatural reaction',
+            'abiological', 'non-native', 'non native', 'non-native transformation',
+            'non-native reaction', 'noncanonical', 'non-canonical',
+            'currently unknown in nature', 'unknown in nature', 'not known in nature',
+            'not found in nature', 'promiscuous radical',
+        ])
+        has_characterized = any(k in text for k in [
+            'purified', 'kinetic', 'kcat', 'km ', 'substrate scope', 'crystal structure',
+            'pdb', 'activity assay', 'enzyme assay', 'mutagenesis', 'variant', 'active site',
+            'mechanistic studies', 'catalyse', 'catalyze', 'catalysed', 'catalyzed',
+        ])
         if has_photoenzyme and has_flavin:
             tags['photoenzymatic_application_status'] = 'applied to new-to-nature reaction' if has_new_to_nature else 'candidate not yet photoenzymatic'
             tags['new_to_nature_reaction'] = 'true' if has_new_to_nature else 'unclear'
             tags['search_track'] = 'A_used_flavin_photoenzyme_new_to_nature'
             tags['paper_domain'] = 'flavin photoenzymatic application'
-        elif has_flavin and has_characterized:
+        elif has_flavin and (has_characterized or flavin_enzyme_family_signal):
             tags['photoenzymatic_application_status'] = 'candidate not yet photoenzymatic'
-            tags['new_to_nature_reaction'] = 'false'
+            tags['new_to_nature_reaction'] = 'true' if has_new_to_nature else 'false'
             tags['search_track'] = 'B_characterized_flavin_enzyme_not_photoenzymatic'
             tags['paper_domain'] = 'characterized flavin enzyme non-photo'
         elif has_photoenzyme:
@@ -3536,7 +4009,7 @@ def fallback_extract(title: str, abstract: str, schema: Optional[Dict[str, str]]
             tags['new_to_nature_reaction'] = 'true' if has_new_to_nature else 'unclear'
             tags['search_track'] = 'C_photoenzyme_non_flavin'
             tags['paper_domain'] = 'photoenzymatic non-flavin'
-        elif has_photo_radical_signal:
+        elif has_photo_radical_signal and not (has_flavin and flavin_enzyme_family_signal):
             tags['photoenzymatic_application_status'] = 'no enzyme'
             tags['new_to_nature_reaction'] = 'false'
             tags['search_track'] = 'D_organic_photochemistry_no_enzyme'

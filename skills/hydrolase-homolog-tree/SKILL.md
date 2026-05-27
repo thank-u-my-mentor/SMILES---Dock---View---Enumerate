@@ -31,7 +31,7 @@ Use this skill for small seed FASTA sets of experimentally characterized enzymes
 2. If `base.xlsx` is provided, extract a seed provenance table and enrich it with paper/vector/tag evidence.
 3. If DOI is missing, query UniProt for publication and PDB candidates before using broader literature discovery.
 4. Use `literature-agent` style expansion from the seed DOI/UniProt/PDB candidates to find missed enzyme papers.
-   For flavin/photoenzymatic discovery projects, start from `literature-agent` output `homolog_candidate_seeds.csv`: manually confirm enzyme name, UniProt/PDB/sequence evidence, and DOI before adding rows to a seed FASTA or `base.xlsx`.
+   For flavin/photoenzymatic discovery projects, start from `literature-agent` output `enzyme_seed_candidates.csv` and, when present, `enzyme_seed_candidates.fasta`: manually confirm enzyme name, UniProt/PDB/sequence evidence, and DOI before adding rows to a seed FASTA or `base.xlsx`. Use `homolog_candidate_seeds.csv` as the paper-level evidence table.
 5. Fetch bounded homologs with `scripts/fetch_hmmer_homologs.py`, or use the user's HMMER web output FASTA directly.
 6. Run the inherited SSN/representative-selection script `scripts/ssn_pipeline_mmseq2.py`.
 7. Run the inherited tree/iTOL script `scripts/tree_pipeline.py`.
@@ -79,10 +79,12 @@ Then use `$literature-agent` on that CSV to perform broader DOI/citation discove
 For flavin/photoenzymatic candidate discovery coming from `$literature-agent`, review:
 
 ```bash
+/mnt/e/literature_flavin_photoenzyme/enzyme_seed_candidates.csv
+/mnt/e/literature_flavin_photoenzyme/enzyme_seed_candidates.fasta
 /mnt/e/literature_flavin_photoenzyme/homolog_candidate_seeds.csv
 ```
 
-Use it as a manual bridge table. Confirm a real enzyme accession, sequence, or PDB entry for each selected row, then add the chosen enzymes to `base.xlsx` and the curated seed FASTA before running SSN/tree expansion.
+Use the CSV as the manual bridge table and the FASTA only as a starting point, not as an automatically trusted core set. Confirm a real enzyme accession, sequence, or PDB entry for each selected row, then add the chosen enzymes to `base.xlsx` and the curated seed FASTA before running SSN/tree expansion.
 
 For reproducing the user's current known local result from existing HMMER output, prefer the two-step local path:
 
@@ -176,7 +178,7 @@ python /mnt/e/Codex/skills/hydrolase-homolog-tree/scripts/build_tree_annotations
 
 This keeps user-facing iTOL upload files at the same level as `itol_core_highlight.txt`:
 
-- `itol_base_candidate_highlight.txt`: binary red-circle/yellow-star curation track from `base.xlsx`.
+- `itol_extra_unvalidated_stars.txt`: yellow-star track for unvalidated manual candidates from `base.xlsx`.
 - `itol_core_short_name_text.txt`: short enzyme labels from `base.xlsx`.
 - `itol_soluprot_gradient_symbols.txt`: optional SoluProt red-yellow-green gradient dots.
 
@@ -271,8 +273,8 @@ When the user updates `base.xlsx` with manual candidate flags, convert those row
 
 Current rules:
 
-- `备注` containing `漏补候选`: red circle in the binary curation track, treated as a literature-backed missed core candidate.
-- `备注` containing `额外候选`: yellow star in the binary curation track, treated as an unvalidated manual candidate.
+- `备注` containing `漏补候选`: merged directly into `itol_core_highlight.txt` and treated like the other core sequences.
+- `备注` containing `额外候选`: large yellow star with a black border in `itol_extra_unvalidated_stars.txt`.
 - All non-extra core/curated rows get a text label from `酶名称`.
 - If `酶名称` contains half-width or full-width parentheses, use only the last parenthesized short name. For example, `Ylehd Epoxide hydrolase (YlEH)` becomes `YlEH`.
 
@@ -289,7 +291,7 @@ python /mnt/e/Codex/skills/hydrolase-homolog-tree/scripts/annotate_base_xlsx_ito
 
 This writes:
 
-- `itol_base_candidate_highlight.txt`: red-circle/yellow-star candidate binary track.
+- `itol_extra_unvalidated_stars.txt`: extra unvalidated candidate yellow-star symbols.
 - `itol_core_short_name_text.txt`: core enzyme short-name labels.
 - `base_itol_annotation_summary.csv`: matched/unmatched audit table.
 
@@ -356,7 +358,7 @@ Expected end-to-end output layout:
 - `02_ssn/tree_analysis/itol_kingdom_color_strip.txt`
 - `02_ssn/tree_analysis/itol_phylum_label.txt`
 - `02_ssn/tree_analysis/itol_core_highlight.txt`
-- optional `02_ssn/tree_analysis/itol_base_candidate_highlight.txt`
+- optional `02_ssn/tree_analysis/itol_extra_unvalidated_stars.txt`
 - optional `02_ssn/tree_analysis/itol_core_short_name_text.txt`
 - optional `02_ssn/tree_analysis/itol_soluprot_gradient_symbols.txt`
 - optional `02_ssn/tree_analysis/annotations/`

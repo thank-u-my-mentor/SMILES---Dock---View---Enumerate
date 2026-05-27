@@ -40,6 +40,10 @@ except ImportError:
     sns = None
 
 
+class SemanticScholarRateLimitCircuitOpen(RuntimeError):
+    """Semantic Scholar returned 429 and this run should stop SS requests."""
+
+
 # ==================== 配置 ====================
 DISCOVERY_DEFAULTS = {
     "rate_limit_delay": 1.0,
@@ -151,9 +155,23 @@ class SemanticScholarClient:
 
     BASE_URL = "https://api.semanticscholar.org/graph/v1"
 
-    def __init__(self, api_key: Optional[str] = None, rate_limit_delay: float = 1.0):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        rate_limit_delay: float = 1.0,
+        max_retries: int = 5,
+        backoff_factor: float = 2.0,
+        max_backoff: float = 90.0,
+        stop_on_rate_limit: bool = True,
+    ):
         self.api_key = api_key
         self.delay = rate_limit_delay
+        self.max_retries = max(0, int(max_retries))
+        self.backoff_factor = max(1.0, float(backoff_factor))
+        self.max_backoff = max(1.0, float(max_backoff))
+        self.stop_on_rate_limit = bool(stop_on_rate_limit)
+        self.rate_limit_stopped = False
+        self.rate_limit_reason = ""
         self.session = requests.Session()
         self.session.headers.update({
             "Accept": "application/json",
@@ -164,20 +182,58 @@ class SemanticScholarClient:
         # 简单内存缓存
         self._cache: Dict[str, Any] = {}
 
+    def _retry_wait_seconds(self, resp, attempt: int) -> float:
+        retry_after = resp.headers.get("Retry-After") if resp is not None else None
+        if retry_after:
+            try:
+                return min(self.max_backoff, max(self.delay, float(retry_after)))
+            except ValueError:
+                pass
+        return min(self.max_backoff, max(self.delay, self.delay * (self.backoff_factor ** attempt)))
+
+    def _request_with_retries(self, method: str, url: str, **kwargs):
+        if self.rate_limit_stopped:
+            raise SemanticScholarRateLimitCircuitOpen(
+                self.rate_limit_reason or "Semantic Scholar rate limit circuit is open."
+            )
+        last_resp = None
+        for attempt in range(self.max_retries + 1):
+            if attempt == 0:
+                time.sleep(self.delay)
+            resp = self.session.request(method, url, timeout=30, **kwargs)
+            last_resp = resp
+            if resp.status_code != 429:
+                return resp
+            if self.stop_on_rate_limit:
+                self.rate_limit_stopped = True
+                self.rate_limit_reason = (
+                    "Semantic Scholar returned 429. Stopping remaining Semantic Scholar "
+                    "requests for this run; continuing with papers already collected."
+                )
+                print(f"      [SS] Rate limited (429). {self.rate_limit_reason}")
+                return resp
+            if attempt >= self.max_retries:
+                break
+            wait = self._retry_wait_seconds(resp, attempt)
+            print(f"      [SS] Rate limited (429), retry {attempt + 1}/{self.max_retries} after {wait:.1f}s...")
+            time.sleep(wait)
+        if last_resp is not None and last_resp.status_code == 429:
+            self.rate_limit_stopped = True
+            self.rate_limit_reason = (
+                "Semantic Scholar still returned 429 after retries. "
+                "Stopping remaining Semantic Scholar requests for this run."
+            )
+        return last_resp
+
     def _get(self, endpoint: str, params: Optional[Dict] = None) -> Dict:
         cache_key = f"{endpoint}:{json.dumps(params or {}, sort_keys=True)}"
         if cache_key in self._cache:
             return self._cache[cache_key]
 
         url = f"{self.BASE_URL}/{endpoint}"
-        time.sleep(self.delay)
 
         try:
-            resp = self.session.get(url, params=params, timeout=30)
-            if resp.status_code == 429:
-                print(f"      [SS] Rate limited (429), waiting 12s...")
-                time.sleep(12)
-                resp = self.session.get(url, params=params, timeout=30)
+            resp = self._request_with_retries("GET", url, params=params)
             resp.raise_for_status()
             data = resp.json()
             self._cache[cache_key] = data
@@ -251,13 +307,8 @@ class SemanticScholarClient:
             "fields": ",".join(fields or default_fields)
         }
         url = f"{self.BASE_URL}/paper/batch"
-        time.sleep(self.delay)
         try:
-            resp = self.session.post(url, json=payload, timeout=30)
-            if resp.status_code == 429:
-                print(f"      [SS] Batch rate limited, waiting 12s...")
-                time.sleep(12)
-                resp = self.session.post(url, json=payload, timeout=30)
+            resp = self._request_with_retries("POST", url, json=payload)
             resp.raise_for_status()
             return resp.json()
         except requests.exceptions.RequestException as e:
@@ -444,6 +495,9 @@ class LiteratureDiscovery:
         print(f"\n[Discovery] 种子: {len(self.seed_dois)} 篇 | 模式: {mode} | 深度: {max_depth} | 每节点上限: {breadth_limit}")
 
         while queue and len(self.discovered) < self.max_papers:
+            if getattr(self.client, "rate_limit_stopped", False):
+                print("[Discovery] Semantic Scholar rate-limit circuit is open; stopping expansion.")
+                break
             current, depth = queue.pop(0)
             if depth >= max_depth:
                 continue
@@ -473,6 +527,8 @@ class LiteratureDiscovery:
                     print(f"      [!] citations fetch failed for {doi[:30]}: {e}")
 
             if mode in ("references", "both"):
+                if getattr(self.client, "rate_limit_stopped", False):
+                    break
                 try:
                     resp = self.client.get_references(doi, limit=breadth_limit)
                     for item in (resp.get("data") or []):
@@ -491,6 +547,8 @@ class LiteratureDiscovery:
                     print(f"      [!] references fetch failed for {doi[:30]}: {e}")
 
             if mode == "related":
+                if getattr(self.client, "rate_limit_stopped", False):
+                    break
                 try:
                     resp = self.client.get_related(doi, limit=breadth_limit)
                     for paper in (resp.get("data") or []):
@@ -551,6 +609,9 @@ class LiteratureDiscovery:
                         new_papers.append(dp)
             print(f"[Discovery] 搜索 '{query}' → {len(new_papers)} 篇相关")
             return new_papers
+        except SemanticScholarRateLimitCircuitOpen as e:
+            print(f"[Discovery] Search skipped after Semantic Scholar 429: {e}")
+            return []
         except Exception as e:
             print(f"[Discovery] 搜索失败: {e}")
             return []
@@ -1054,7 +1115,11 @@ def discovery_cli():
     parser.add_argument("--breadth-limit", type=int, default=20, help="每节点邻居上限")
     parser.add_argument("--relevance-threshold", type=float, default=0.25, help="相关性阈值")
     parser.add_argument("--max-papers", type=int, default=500, help="总文献上限")
-    parser.add_argument("--rate-limit", type=float, default=1.0, help="API 请求间隔（秒）")
+    parser.add_argument("--rate-limit", type=float, default=1.0, help="API request interval in seconds")
+    parser.add_argument("--ss-max-retries", type=int, default=0, help="Semantic Scholar 429 retry count; default 0 avoids long waits")
+    parser.add_argument("--ss-continue-after-429", action="store_true", help="Continue later Semantic Scholar requests after 429")
+    parser.add_argument("--search-limit", type=int, default=25, help="每条关键词搜索最多取多少篇")
+    parser.add_argument("--max-search-queries", type=int, default=4, help="Max supplemental keyword searches; 0 disables them")
     parser.add_argument("--search", action="append", help="额外关键词搜索（可多次）")
     parser.add_argument("--export-gexf", action="store_true", help="导出 Gephi GEXF")
     parser.add_argument("--export-edgelist", action="store_true", help="导出边列表 CSV")
@@ -1080,7 +1145,12 @@ def discovery_cli():
     print(f"[CLI] 加载种子 {len(seed_papers)} 篇")
 
     # 初始化
-    client = SemanticScholarClient(api_key=args.ss_api_key, rate_limit_delay=args.rate_limit)
+    client = SemanticScholarClient(
+        api_key=args.ss_api_key,
+        rate_limit_delay=args.rate_limit,
+        max_retries=args.ss_max_retries,
+        stop_on_rate_limit=not args.ss_continue_after_429,
+    )
     discovery = LiteratureDiscovery(client,
                                     relevance_threshold=args.relevance_threshold,
                                     max_papers=args.max_papers)
@@ -1090,9 +1160,17 @@ def discovery_cli():
                     breadth_limit=args.breadth_limit)
 
     # 额外搜索
-    if args.search:
-        for q in args.search:
-            discovery.search(q, limit=50)
+    if args.search and args.max_search_queries != 0:
+        search_queries = args.search[:args.max_search_queries] if args.max_search_queries > 0 else args.search
+        if args.max_search_queries > 0 and len(args.search) > len(search_queries):
+            print(f"[Discovery] Skipping {len(args.search) - len(search_queries)} extra keyword searches due to --max-search-queries={args.max_search_queries}")
+        for q in search_queries:
+            if getattr(client, "rate_limit_stopped", False):
+                print("[Discovery] Semantic Scholar rate-limit circuit is open; skipping remaining keyword searches.")
+                break
+            discovery.search(q, limit=args.search_limit)
+    elif args.search and args.max_search_queries == 0:
+        print("[Discovery] Supplemental Semantic Scholar keyword searches disabled by --max-search-queries=0")
 
     # 网络分析
     analyzer = CitationNetworkAnalyzer()
