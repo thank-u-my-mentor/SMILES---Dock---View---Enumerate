@@ -514,6 +514,17 @@ def apply_research_criteria_to_paper(paper: "PaperNode", criteria: ResearchCrite
     paper.tags["criteria_missing"] = " | ".join(missing)
     if criteria.goal.strip():
         paper.tags["criteria_goal"] = criteria.goal.strip()
+    if criteria.field.strip():
+        if field_hit:
+            paper.tags["field_match_status"] = "field_hit"
+        elif feature_hit:
+            paper.tags["field_match_status"] = "enzyme_only_field_missing"
+        else:
+            paper.tags["field_match_status"] = "field_missing"
+    elif criteria.enzyme_feature.strip():
+        paper.tags["field_match_status"] = "enzyme_scope_no_field"
+    else:
+        paper.tags["field_match_status"] = "no_field_constraint"
     if status == "criteria_pass":
         paper.tags["manual_review_priority"] = "high"
     elif status == "criteria_borderline" and tag_get(paper.tags, "manual_review_priority", default="low") == "low":
@@ -1398,6 +1409,8 @@ def write_zotero_overlap_report(
             f"- Year: {paper.year}",
             f"- Journal: {paper.journal}",
             f"- Domain: {tag_get(paper.tags, 'paper_domain')}",
+            f"- Field match: {paper.tags.get('field_match_status', '')}",
+            f"- Criteria: {paper.tags.get('criteria_status', '')} {paper.tags.get('criteria_score', '')}; missing={paper.tags.get('criteria_missing', '')}",
             f"- Enzyme family: {tag_get(paper.tags, 'enzyme_family')}",
             "",
         ])
@@ -1441,6 +1454,7 @@ def paper_to_dashboard_record(paper: PaperNode) -> Dict:
         "criteria_status": paper.tags.get("criteria_status", ""),
         "criteria_score": paper.tags.get("criteria_score", ""),
         "criteria_missing": paper.tags.get("criteria_missing", ""),
+        "field_match_status": paper.tags.get("field_match_status", ""),
         "criteria_field_hits": paper.tags.get("criteria_field_hits", ""),
         "criteria_enzyme_feature_hits": paper.tags.get("criteria_enzyme_feature_hits", ""),
         "criteria_reaction_hits": paper.tags.get("criteria_reaction_hits", ""),
@@ -1528,6 +1542,7 @@ def write_literature_dashboard(papers: List[PaperNode], output_dir: Path, citati
       <select id="family"></select>
       <select id="reaction"></select>
       <select id="priority"></select>
+      <select id="fieldMatch"></select>
     </div>
     <div class="stats" id="stats"></div>
   </header>
@@ -1563,10 +1578,10 @@ function fillSelect(id, label, field) {{
 function escapeHtml(s) {{ return String(s ?? '').replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c])); }}
 function applyFilters() {{
   const q = $('q').value.toLowerCase().trim();
-  const zotero = $('zotero').value, domain = $('domain').value, fam = $('family').value, rxn = $('reaction').value, pri = $('priority').value;
+  const zotero = $('zotero').value, domain = $('domain').value, fam = $('family').value, rxn = $('reaction').value, pri = $('priority').value, fieldMatch = $('fieldMatch').value;
   filtered = papers.filter(p => {{
-    const blob = [p.title,p.doi,p.abstract,p.metadata_keywords,p.enzyme_family,p.reaction_type,p.mechanism,p.search_track,p.flavin_cofactor,p.photoenzymatic_application_status,p.characterized_enzyme_evidence,p.structure_similarity_hint,p.criteria_status,p.criteria_field_hits,p.criteria_enzyme_feature_hits,p.criteria_reaction_hits].join(' ').toLowerCase();
-    return (!q || blob.includes(q)) && (!zotero || p.zotero_status === zotero) && (!domain || p.paper_domain === domain) && (!fam || p.enzyme_family === fam) && (!rxn || p.reaction_type === rxn) && (!pri || p.review_priority === pri);
+    const blob = [p.title,p.doi,p.abstract,p.metadata_keywords,p.enzyme_family,p.reaction_type,p.mechanism,p.search_track,p.flavin_cofactor,p.photoenzymatic_application_status,p.characterized_enzyme_evidence,p.structure_similarity_hint,p.criteria_status,p.field_match_status,p.criteria_field_hits,p.criteria_enzyme_feature_hits,p.criteria_reaction_hits].join(' ').toLowerCase();
+    return (!q || blob.includes(q)) && (!zotero || p.zotero_status === zotero) && (!domain || p.paper_domain === domain) && (!fam || p.enzyme_family === fam) && (!rxn || p.reaction_type === rxn) && (!pri || p.review_priority === pri) && (!fieldMatch || p.field_match_status === fieldMatch);
   }});
   renderList();
   renderStats();
@@ -1597,6 +1612,7 @@ function renderList() {{
         <span class="chip">${{escapeHtml(p.zotero_status || '')}}</span>
         <span class="chip">${{escapeHtml(p.paper_domain)}}</span>
         <span class="chip">${{escapeHtml(p.criteria_status || '')}}</span>
+        <span class="chip">${{escapeHtml(p.field_match_status || '')}}</span>
         <span class="chip">${{escapeHtml(p.search_track || p.flavin_cofactor || '')}}</span>
         <span class="chip">${{escapeHtml(p.reaction_type)}}</span>
         <span class="chip">${{escapeHtml(p.review_priority)}}</span>
@@ -1614,7 +1630,7 @@ function selectPaper(i, rerender=true) {{
       <div>DOI</div><div>${{selected.doi ? `<a href="https://doi.org/${{escapeHtml(selected.doi)}}" target="_blank">${{escapeHtml(selected.doi)}}</a>` : 'missing'}}</div>
       <div>Zotero状态</div><div>${{escapeHtml(selected.zotero_status || '')}}</div>
       <div>文献域</div><div>${{escapeHtml(selected.paper_domain)}}</div>
-      <div>Criteria</div><div>${{escapeHtml(selected.criteria_status || '')}} · ${{escapeHtml(selected.criteria_score || '')}} · missing=${{escapeHtml(selected.criteria_missing || '')}}</div>
+      <div>Criteria</div><div>${{escapeHtml(selected.criteria_status || '')}} · ${{escapeHtml(selected.criteria_score || '')}} · field=${{escapeHtml(selected.field_match_status || '')}} · missing=${{escapeHtml(selected.criteria_missing || '')}}</div>
       <div>Criteria命中</div><div>${{escapeHtml([selected.criteria_field_hits, selected.criteria_enzyme_feature_hits, selected.criteria_reaction_hits].filter(Boolean).join(' / '))}}</div>
       <div>Flavin任务分轨</div><div>${{escapeHtml(selected.search_track || '')}}</div>
       <div>Flavin辅因子</div><div>${{escapeHtml(selected.flavin_cofactor || '')}}</div>
@@ -1637,7 +1653,8 @@ function setup() {{
   fillSelect('family', '全部酶家族', 'enzyme_family');
   fillSelect('reaction', '全部反应', 'reaction_type');
   fillSelect('priority', '全部优先级', 'review_priority');
-  ['q','zotero','domain','family','reaction','priority'].forEach(id => $(id).addEventListener('input', applyFilters));
+  fillSelect('fieldMatch', '全部field命中', 'field_match_status');
+  ['q','zotero','domain','family','reaction','priority','fieldMatch'].forEach(id => $(id).addEventListener('input', applyFilters));
   $('tabDetail').onclick = () => showTab('detail');
   $('tabNetwork').onclick = () => showTab('network');
   applyFilters();
@@ -2111,6 +2128,17 @@ def default_search_queries_for_task(schema_profile: str, task_prompt: str) -> Li
     text = f"{schema_profile} {task_prompt}".lower()
     if "flavin" not in text and "fad" not in text and "fmn" not in text and "yellow enzyme" not in text:
         return []
+    if schema_profile == "flavin-photoenzyme" and not any(
+        k in text for k in ["photoenzym", "photoenzyme", "photobiocatal", "new-to-nature", "new to nature"]
+    ):
+        return [
+            "\"flavin-dependent\" enzyme \"substrate scope\"",
+            "\"FAD\" enzyme substrate scope kinetics structure",
+            "\"FMN\" enzyme substrate scope kinetics structure",
+            "\"flavoenzyme\" kinetics structure substrate",
+            "\"old yellow enzyme\" kinetics structure",
+            "\"ene-reductase\" enzyme substrate scope",
+        ]
     return [
         "\"flavin\" photoenzymatic \"new-to-nature\"",
         "\"FAD\" \"photoenzymatic\" radical enzyme",

@@ -1,0 +1,42 @@
+{
+  "query": {
+    "type": "group",
+    "logical_operator": "and",
+    "nodes": [
+      {
+        "type": "terminal",
+        "service": "chemical",
+        "parameters": {
+          "type": "descriptor",
+          "descriptor_type": "SMILES",
+          "match_type": "sub-struct-graph-relaxed",
+          "value": "C(F)(F)F"
+        }
+      },
+      {
+        "type": "terminal",
+        "service": "text",
+        "parameters": {
+          "attribute": "rcsb_nonpolymer_instance_annotation.comp_id",
+          "operator": "in",
+          "value": ["FE", "CO", "NI", "CU", "MN"]
+        }
+      }
+    ]
+  },
+  "return_type": "entry",
+  "request_options": {
+    "paginate": {
+      "start": 0,
+      "rows": 1000
+    },
+    "results_content_type": ["experimental"],
+    "sort": [
+      {
+        "sort_by": "score",
+        "direction": "desc"
+      }
+    ],
+    "scoring_strategy": "combined"
+  }
+}

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Phylogenetic Tree"
+  short_description: "General FASTA-to-HMMER/SSN/tree/iTOL workflow."
+  default_prompt: "Use $Phylogenetic-Tree to prepare a protein FASTA seed set, run homolog/SSN/tree steps, and generate iTOL annotations."
+policy:
+  allow_implicit_invocation: true

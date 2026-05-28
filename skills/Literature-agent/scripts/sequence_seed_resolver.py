@@ -106,6 +106,7 @@ NAME_PATTERNS = [
     r"\b[A-Z][a-z]{1,5}NTR(?:-[A-Z0-9]+)*\b",
     r"\bPaDADH(?:-[A-Z0-9]+)*\b",
     r"\bPseudomonas aeruginosa D-arginine dehydrogenase\b",
+    r"\bD-2-hydroxyglutarate dehydrogenase\b",
     r"\bovenolide biosynthetic flavoenzyme\b",
     r"\b[A-Z][A-Za-z0-9]{1,8}(?:ase|ER|OYE|FAP|FDH|NTR)(?:-[A-Z0-9]+)*\b",
 ]
@@ -181,6 +182,28 @@ KNOWN_PAPER_OVERRIDES = {
         "organism_candidates": "Gluconobacter oxydans",
         "organism_evidence": "doi_override:PDB 6O08 organism Gluconobacter oxydans",
     },
+    "10.1021/jacs.5c19848": {
+        "resolution_status": "specific_with_organism",
+        "resolution_reason": "Supporting information gives wild-type GsOYE accession M2XAQ9 and PDB 6S0G.",
+        "specific_enzyme_names": "GsOYE | wild-type GsOYE",
+        "parent_enzyme_names": "GsOYE",
+        "canonical_enzyme": "GsOYE",
+        "mutations_or_variants": "wild type",
+        "organism_candidates": "Galdieria sulphuraria",
+        "organism_evidence": "supporting_information:OYE from Galdieria sulphuraria (GsOYE)",
+        "enzyme_family": "ERED/OYE",
+        "enzyme_name_original": "OYE from Galdieria sulphuraria (GsOYE), wild type",
+        "cofactor_class": "flavin",
+        "cofactor_detail": "FMN/flavin",
+        "cofactor_evidence": "supporting_information:flavin-dependent ERED/OYE GsOYE",
+        "flavin_dependency_status": "confirmed_flavin_dependent",
+        "enzyme_function_class": "ERED/OYE ene-reductase repurposed as isomerase",
+        "ec_number_candidates": "",
+        "sequence_resolution_route": "supplement_accession_first",
+        "pdb_ids": "6S0G",
+        "pdb_evidence": "supporting_information:PDB 6S0G; wild-type GsOYE",
+        "uniprot_id": "M2XAQ9",
+    },
 }
 
 
@@ -227,6 +250,10 @@ def clean_candidate_name(value: str) -> str:
 def is_generic_name(value: str, title: str = "") -> bool:
     low = f"{value} {title}".lower()
     if not value or value.lower() in {"unclear", "nan", "none", "n/a", "specific not named", "specific not named in abstract"}:
+        return True
+    if re.fullmatch(r"EC\s*\d+\.\d+\.\d+\.(?:\d+|-)", value, flags=re.I):
+        return True
+    if re.fullmatch(r"UniProt\s+[A-Z0-9]{4,12}", value, flags=re.I):
         return True
     if any(phrase in value.lower() for phrase in [
         "rounds of protein engineering", "specific not named", "specific enzyme unclear",
@@ -522,8 +549,63 @@ def apply_known_override(candidate: Dict[str, str], doi: str) -> None:
     purls = pdb_urls(split_multi(candidate.get("pdb_ids", "")), " ".join(t for t in [canonical, organism, candidate.get("title", "")] if t))
     candidate.update(urls)
     candidate.update(purls)
+    candidate["uniprot_entry_url"] = uniprot_entry_url(candidate.get("uniprot_id", ""))
     candidate["protein_query"] = " ".join(t for t in [canonical, organism] if t)
     candidate["dna_query"] = " ".join(t for t in [canonical, organism, "gene"] if t)
+
+
+def tree_ready_row(row: Dict[str, str]) -> Dict[str, str]:
+    uniprot_ids = split_multi(row.get("uniprot_id", ""))
+    pdb_ids = split_multi(row.get("pdb_ids", ""))
+    seed_rank = score_tree_seed(row)
+    return {
+        "seed_rank": seed_rank,
+        "include_in_core_fasta": "",
+        "enzyme_short_name": row.get("canonical_enzyme", ""),
+        "family": row.get("enzyme_family", ""),
+        "function_class": row.get("enzyme_function_class", ""),
+        "source_organism": row.get("organism_candidates", ""),
+        "uniprot_id": uniprot_ids[0] if uniprot_ids else "",
+        "pdb_id": pdb_ids[0] if pdb_ids else "",
+        "key_doi": row.get("doi", ""),
+        "paper_title": row.get("title", ""),
+        "flavin_dependency_status": row.get("flavin_dependency_status", ""),
+        "cofactor_class": row.get("cofactor_class", ""),
+        "sequence_resolution_route": row.get("sequence_resolution_route", ""),
+        "evidence_source": row.get("organism_evidence", ""),
+        "evidence_note": row.get("resolution_reason", ""),
+        "protein_query": row.get("protein_query", ""),
+        "uniprot_url": row.get("uniprot_entry_url") or row.get("uniprot_url", ""),
+        "pdb_url": row.get("pdb_url", ""),
+        "reaction_type": row.get("reaction_type", ""),
+        "new_to_nature_reaction": row.get("new_to_nature_reaction", ""),
+        "manual_notes": "",
+    }
+
+
+def score_tree_seed(row: Dict[str, str]) -> str:
+    if row.get("flavin_dependency_status") != "confirmed_flavin_dependent":
+        return "review"
+    if row.get("resolution_status") != "specific_with_organism":
+        return "review"
+    if row.get("uniprot_id") and row.get("pdb_ids"):
+        return "A_pdb_uniprot"
+    if row.get("uniprot_id"):
+        return "B_uniprot"
+    if row.get("pdb_ids"):
+        return "B_pdb"
+    return "C_name_organism"
+
+
+def build_tree_ready_rows(rows: Sequence[Dict[str, str]]) -> List[Dict[str, str]]:
+    candidates = [
+        tree_ready_row(row)
+        for row in rows
+        if row.get("flavin_dependency_status") in {"confirmed_flavin_dependent", "likely_flavin_dependent"}
+        and row.get("resolution_status") != "non_flavin_exclude"
+    ]
+    rank_order = {"A_pdb_uniprot": 0, "B_uniprot": 1, "B_pdb": 2, "C_name_organism": 3, "review": 4}
+    return sorted(candidates, key=lambda r: (rank_order.get(r["seed_rank"], 9), r.get("enzyme_short_name", ""), r.get("key_doi", "")))
 
 
 def classify_row(row: Dict[str, str], names: Sequence[str], organisms: Sequence[str]) -> Tuple[str, str]:
@@ -553,6 +635,13 @@ def query_urls(name: str, organism: str) -> Dict[str, str]:
         "ncbi_nucleotide_url": "https://www.ncbi.nlm.nih.gov/nuccore/?term=" + quote_plus(dna_terms),
         "ena_url": "https://www.ebi.ac.uk/ena/browser/text-search?query=" + quote_plus(dna_terms),
     }
+
+
+def uniprot_entry_url(uniprot_id: str) -> str:
+    ids = split_multi(uniprot_id)
+    if not ids:
+        return ""
+    return " | ".join(f"https://www.uniprot.org/uniprotkb/{uid}/entry" for uid in ids)
 
 
 def combine_rows(enzyme_rows: List[Dict[str, str]], homolog_rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -620,6 +709,7 @@ def build_candidates(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
             "pdb_ids": " | ".join(pdb_ids),
             "pdb_evidence": " | ".join(pdb_evidence),
             "uniprot_id": row.get("uniprot_id", ""),
+            "uniprot_entry_url": uniprot_entry_url(row.get("uniprot_id", "")),
             "ec_number_candidates": " | ".join(extract_ec_numbers(row)),
             "sequence_resolution_route": route,
             **cofactor,
@@ -640,7 +730,7 @@ def canonical_enzyme_name(row: Dict[str, str]) -> str:
     ])
     priority = [
         r"\bPfBAL\b", r"\bCvFAP\b", r"\bGluER\b", r"\bGsOYE\b", r"\bOaER\b", r"\bOYE1\b", r"\bPaDADH\b",
-        r"\bPqsL\b", r"\b[A-Z][a-z]{1,4}ER\b", r"\b[A-Z][a-z]OYE\d*\b",
+        r"\bPqsL\b", r"\bD-2-hydroxyglutarate dehydrogenase\b", r"\b[A-Z][a-z]{1,4}ER\b", r"\b[A-Z][a-z]OYE\d*\b",
         r"\b[A-Z][a-z]{1,5}FDH\b", r"\b[A-Z][a-z]{1,5}NTR\b",
         r"\bbenzaldehyde lyase\b",
         r"\bPseudomonas aeruginosa D-arginine dehydrogenase\b",
@@ -763,38 +853,53 @@ def render_html(rows: Sequence[Dict[str, str]], output_path: Path) -> None:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sequence Seed Review</title>
 <style>
-:root {{ color-scheme: light; --ink:#17202a; --muted:#64748b; --line:#d6dee8; --bg:#f5f7fa; --panel:#ffffff; --soft:#eef4f7; --accent:#006d77; --good:#0f766e; --warn:#9a5b00; --bad:#9f1239; --blue:#285a8d; }}
+:root {{ color-scheme: light; --ink:#17202a; --muted:#64748b; --line:#d6dee8; --bg:#f5f7fa; --panel:#ffffff; --soft:#eef4f7; --accent:#006d77; --good:#0f766e; --warn:#9a5b00; --bad:#9f1239; --blue:#285a8d; --violet:#6d4bb3; --amber:#b7791f; }}
 * {{ box-sizing:border-box; }}
 body {{ margin:0; font:13px/1.42 system-ui, -apple-system, Segoe UI, sans-serif; color:var(--ink); background:var(--bg); }}
-header {{ padding:18px 24px 12px; background:var(--panel); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }}
+header {{ padding:18px 24px 12px; background:linear-gradient(180deg, #ffffff 0%, #f7fbfc 100%); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; box-shadow:0 10px 28px rgba(22, 34, 51, .06); }}
 h1 {{ margin:0; font-size:21px; letter-spacing:0; }}
 .sub {{ color:var(--muted); max-width:1160px; margin-top:5px; }}
 .stats {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(178px, 1fr)); gap:8px; margin-top:12px; }}
-.stat {{ border:1px solid var(--line); background:#fbfdff; padding:8px 10px; border-radius:6px; min-width:0; display:flex; justify-content:space-between; gap:12px; }}
+.stat {{ border:1px solid var(--line); background:#fbfdff; padding:8px 10px; border-radius:6px; min-width:0; display:flex; justify-content:space-between; gap:12px; box-shadow:0 2px 10px rgba(15, 23, 42, .035); transition:transform .16s ease, box-shadow .16s ease, border-color .16s ease; }}
+.stat:hover {{ transform:translateY(-1px); box-shadow:0 8px 18px rgba(15, 23, 42, .08); border-color:#9ccfca; }}
 .stat b {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
 .stat span {{ font-weight:700; color:var(--accent); }}
 .stat-total {{ background:#e8f4f3; border-color:#9ccfca; }}
-.toolbar {{ display:grid; grid-template-columns:minmax(260px, 1.6fr) repeat(6, minmax(150px, 1fr)); gap:8px; padding:10px 24px; background:var(--soft); border-bottom:1px solid var(--line); position:sticky; top:129px; z-index:4; }}
-input, select {{ height:34px; min-width:0; border:1px solid var(--line); border-radius:6px; padding:0 9px; background:white; color:var(--ink); }}
+.toolbar {{ display:grid; grid-template-columns:minmax(260px, 1.6fr) repeat(6, minmax(150px, 1fr)); gap:8px; padding:10px 24px; background:rgba(238,244,247,.94); backdrop-filter:blur(8px); border-bottom:1px solid var(--line); position:sticky; top:129px; z-index:4; }}
+input, select {{ height:34px; min-width:0; border:1px solid var(--line); border-radius:6px; padding:0 9px; background:white; color:var(--ink); transition:border-color .16s ease, box-shadow .16s ease, transform .16s ease; }}
+input:focus, select:focus {{ outline:none; border-color:#5aa7a7; box-shadow:0 0 0 3px rgba(0, 109, 119, .14); }}
+select:hover, input:hover {{ border-color:#9bb4c8; }}
 main {{ padding:16px 24px 30px; }}
-table {{ border-collapse:collapse; width:100%; background:var(--panel); border:1px solid var(--line); table-layout:fixed; }}
+table {{ border-collapse:collapse; width:100%; background:var(--panel); border:1px solid var(--line); table-layout:fixed; box-shadow:0 18px 45px rgba(15, 23, 42, .07); }}
 th, td {{ border-bottom:1px solid var(--line); vertical-align:top; padding:8px 9px; word-break:break-word; }}
 th {{ text-align:left; background:#f1f5f8; position:sticky; top:184px; z-index:3; font-size:12px; color:#334155; }}
+tbody tr {{ animation:rowIn .26s ease both; border-left:4px solid transparent; transition:transform .12s ease, box-shadow .12s ease, background .12s ease, border-color .12s ease; }}
+tbody tr:hover {{ transform:translateX(2px); box-shadow:inset 4px 0 0 #9ccfca; }}
+tbody tr[data-dependency="confirmed_flavin_dependent"] {{ border-left-color:#38a169; }}
+tbody tr[data-dependency="likely_flavin_dependent"] {{ border-left-color:#3182ce; }}
+tbody tr[data-dependency="mixed_or_review"] {{ border-left-color:#d69e2e; }}
+tbody tr[data-dependency^="non_flavin"] {{ border-left-color:#d53f8c; }}
 tr:hover td {{ background:#fbfdff; }}
-.pill {{ display:inline-block; padding:2px 7px; border-radius:999px; font-size:12px; border:1px solid var(--line); background:#f8fafc; white-space:nowrap; margin:0 4px 4px 0; }}
+.pill {{ display:inline-block; padding:2px 7px; border-radius:999px; font-size:12px; border:1px solid var(--line); background:#f8fafc; white-space:nowrap; margin:0 4px 4px 0; transition:transform .14s ease; }}
+.pill:hover {{ transform:translateY(-1px); }}
 .specific_with_organism, .confirmed_flavin_dependent {{ color:var(--good); border-color:#86c5b9; background:#eaf8f5; }}
 .likely_flavin_dependent, .specific_missing_organism {{ color:var(--blue); border-color:#9ebee1; background:#edf5ff; }}
 .mixed_or_review, .unknown, .unknown_or_nadph_only, .family_only, .review_or_family_context {{ color:var(--warn); border-color:#e4bd75; background:#fff7e6; }}
 .non_flavin_exclude, .non_flavin_thdp, .non_flavin_pqq, .non_flavin_plp, .non_flavin_heme {{ color:var(--bad); border-color:#e5a3af; background:#fff0f3; }}
+.supplement_accession_first, .pdb_first {{ color:var(--violet); border-color:#c2b5ee; background:#f3f0ff; }}
+.pdb_search_first {{ color:#5f6b7a; border-color:#cbd5e1; background:#f8fafc; }}
+.thdp {{ color:#8a4b18; border-color:#f1bf98; background:#fff2e8; }}
+.flavin {{ color:#26655a; border-color:#a4d7cb; background:#ecfbf7; }}
 .small {{ color:var(--muted); font-size:12px; margin-top:3px; }}
 .title {{ width:25%; }}
 .enzyme {{ width:19%; }}
 .dependency {{ width:17%; }}
 .links {{ width:18%; }}
 .evidence {{ max-height:9.2em; overflow:auto; }}
-a {{ color:var(--accent); text-decoration:none; }}
+a {{ color:var(--accent); text-decoration:none; font-weight:500; }}
 a:hover {{ text-decoration:underline; }}
 .links a {{ display:block; margin-bottom:3px; }}
+@keyframes rowIn {{ from {{ opacity:0; transform:translateY(4px); }} to {{ opacity:1; transform:translateY(0); }} }}
 @media (max-width: 980px) {{
   header {{ position:static; }}
   .toolbar {{ position:static; grid-template-columns:1fr 1fr; }}
@@ -908,6 +1013,100 @@ def render_row(row: Dict[str, str]) -> str:
 </tr>"""
 
 
+def write_xlsx(path: Path, rows: Sequence[Dict[str, str]], fields: Sequence[str]) -> None:
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
+        from openpyxl.formatting.rule import FormulaRule
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        print("[SequenceSeed] openpyxl is unavailable; skipped XLSX export.")
+        return
+
+    wb = Workbook()
+    default = wb.active
+    wb.remove(default)
+    tree_rows = build_tree_ready_rows(rows)
+    manual_rows = [row for row in rows if row.get("resolution_status") in {"family_only", "specific_missing_organism", "review_or_family_context"}]
+    excluded_rows = [row for row in rows if row.get("resolution_status") == "non_flavin_exclude" or row.get("flavin_dependency_status", "").startswith("non_flavin_")]
+
+    tree_fields = [
+        "seed_rank", "include_in_core_fasta", "enzyme_short_name", "family", "function_class",
+        "source_organism", "uniprot_id", "pdb_id", "key_doi", "paper_title",
+        "flavin_dependency_status", "cofactor_class", "sequence_resolution_route",
+        "evidence_source", "evidence_note", "protein_query", "uniprot_url", "pdb_url",
+        "reaction_type", "new_to_nature_reaction", "manual_notes",
+    ]
+    add_sheet(wb, "tree_ready_core", tree_rows, tree_fields, freeze="A2")
+    add_sheet(wb, "all_candidates", rows, fields, freeze="A2")
+    add_sheet(wb, "manual_review", manual_rows, fields, freeze="A2")
+    add_sheet(wb, "excluded_non_flavin", excluded_rows, fields, freeze="A2")
+
+    fills = {
+        "header": PatternFill("solid", fgColor="1F2937"),
+        "a": PatternFill("solid", fgColor="DDF7EC"),
+        "b": PatternFill("solid", fgColor="E5F0FF"),
+        "c": PatternFill("solid", fgColor="FFF3CF"),
+        "exclude": PatternFill("solid", fgColor="FFE4EA"),
+    }
+    thin = Side(style="thin", color="D9E2EC")
+    border = Border(bottom=thin)
+    for ws in wb.worksheets:
+        ws.sheet_view.showGridLines = False
+        ws.auto_filter.ref = ws.dimensions
+        for cell in ws[1]:
+            cell.fill = fills["header"]
+            cell.font = Font(color="FFFFFF", bold=True)
+            cell.alignment = Alignment(vertical="center", wrap_text=True)
+            cell.border = border
+        for row_cells in ws.iter_rows(min_row=2):
+            for cell in row_cells:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+                cell.border = border
+        for col_idx, width in enumerate(preferred_widths(ws), start=1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = width
+        if ws.title == "tree_ready_core" and ws.max_row > 1:
+            ws.conditional_formatting.add(
+                f"A2:A{ws.max_row}",
+                FormulaRule(formula=['LEFT($A2,1)="A"'], fill=fills["a"]),
+            )
+            ws.conditional_formatting.add(
+                f"A2:A{ws.max_row}",
+                FormulaRule(formula=['LEFT($A2,1)="B"'], fill=fills["b"]),
+            )
+            ws.conditional_formatting.add(
+                f"A2:A{ws.max_row}",
+                FormulaRule(formula=['LEFT($A2,1)="C"'], fill=fills["c"]),
+            )
+        if ws.title == "excluded_non_flavin" and ws.max_row > 1:
+            ws.conditional_formatting.add(f"A2:A{ws.max_row}", FormulaRule(formula=["TRUE"], fill=fills["exclude"]))
+    wb.save(path)
+
+
+def add_sheet(wb, title: str, rows: Sequence[Dict[str, str]], fields: Sequence[str], freeze: str = "A2") -> None:
+    ws = wb.create_sheet(title)
+    ws.append(list(fields))
+    for row in rows:
+        ws.append([row.get(field, "") for field in fields])
+    ws.freeze_panes = freeze
+
+
+def preferred_widths(ws) -> List[int]:
+    widths: List[int] = []
+    for col in ws.iter_cols():
+        header = str(col[0].value or "")
+        max_len = max([len(str(cell.value or "")) for cell in col[:80]] + [len(header)])
+        if header in {"paper_title", "evidence_summary", "evidence_note", "evidence_source"}:
+            widths.append(min(max(max_len + 2, 28), 58))
+        elif header.endswith("_url"):
+            widths.append(32)
+        elif header in {"include_in_core_fasta", "new_to_nature_reaction"}:
+            widths.append(18)
+        else:
+            widths.append(min(max(max_len + 2, 12), 34))
+    return widths
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build sequence seed review HTML from literature-agent CSV outputs.")
     parser.add_argument("--enzyme-csv", required=True, help="Path to enzyme_seed_candidates.csv")
@@ -926,7 +1125,7 @@ def main() -> None:
         "resolution_status", "resolution_reason", "specific_enzyme_names",
         "canonical_enzyme", "parent_enzyme_names", "mutations_or_variants", "organism_candidates",
         "organism_evidence", "protein_query", "dna_query", "uniprot_url",
-        "ncbi_protein_url", "ncbi_nucleotide_url", "ena_url", "pdb_url", "rcsb_search_url",
+        "ncbi_protein_url", "ncbi_nucleotide_url", "ena_url", "pdb_url", "rcsb_search_url", "uniprot_entry_url",
         "cofactor_class", "cofactor_detail", "cofactor_evidence", "flavin_dependency_status",
         "enzyme_function_class", "ec_number_candidates", "sequence_resolution_route", "enzyme_family",
         "enzyme_name_original", "doi", "title", "year", "journal", "search_track",
@@ -935,10 +1134,23 @@ def main() -> None:
         "manual_review_priority", "pdb_ids", "pdb_evidence", "uniprot_id", "evidence_summary",
     ]
     csv_path = outdir / f"{args.prefix}_candidates.csv"
+    tree_csv_path = outdir / f"{args.prefix}_tree_ready.csv"
+    xlsx_path = outdir / f"{args.prefix}_tree_ready.xlsx"
     html_path = outdir / f"{args.prefix}_review.html"
     write_csv(csv_path, rows, fields)
+    tree_fields = [
+        "seed_rank", "include_in_core_fasta", "enzyme_short_name", "family", "function_class",
+        "source_organism", "uniprot_id", "pdb_id", "key_doi", "paper_title",
+        "flavin_dependency_status", "cofactor_class", "sequence_resolution_route",
+        "evidence_source", "evidence_note", "protein_query", "uniprot_url", "pdb_url",
+        "reaction_type", "new_to_nature_reaction", "manual_notes",
+    ]
+    write_csv(tree_csv_path, build_tree_ready_rows(rows), tree_fields)
+    write_xlsx(xlsx_path, rows, fields)
     render_html(rows, html_path)
     print(f"[SequenceSeed] Wrote {csv_path} ({len(rows)} rows)")
+    print(f"[SequenceSeed] Wrote {tree_csv_path}")
+    print(f"[SequenceSeed] Wrote {xlsx_path}")
     print(f"[SequenceSeed] Wrote {html_path}")
 
 
