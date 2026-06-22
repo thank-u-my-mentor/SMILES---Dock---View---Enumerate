@@ -72,6 +72,7 @@ ORGANISM_ALIASES = {
     "Chlorella variabilis FAP": "Chlorella variabilis",
     "GluER": "Gluconobacter oxydans",
     "GsOYE": "Galdieria sulphuraria",
+    "OYE3": "Saccharomyces cerevisiae",
     "PaDADH": "Pseudomonas aeruginosa",
     "PfBAL": "Pseudomonas fluorescens",
     "Pseudomonas aeruginosa D-arginine dehydrogenase": "Pseudomonas aeruginosa",
@@ -100,6 +101,7 @@ NAME_PATTERNS = [
     r"\b[A-Z][a-z]{1,4}ER(?:-[A-Z0-9]+)*\b",
     r"\b[A-Z][a-z]OYE\d*(?:-[A-Z0-9]+)*\b",
     r"\bOYE\d+(?:-[A-Z0-9]+)*\b",
+    r"\bOYE3s?\b",
     r"\bCvFAP(?:-[A-Z][0-9]+[A-Z])*\b",
     r"\bFAP(?:-[A-Z][0-9]+[A-Z])*\b",
     r"\b[A-Z][a-z]{1,5}FDH(?:-[A-Z0-9]+)*\b",
@@ -131,6 +133,9 @@ KNOWN_PAPER_OVERRIDES = {
         "cofactor_class": "thdp",
         "cofactor_detail": "ThDP | eosin Y external photocatalyst",
         "cofactor_evidence": "doi_override:user correction; article is ThDP-dependent radical acylation",
+        "external_photocatalyst": "eosin Y",
+        "external_photocatalyst_evidence": "reaction_development:organophotocatalyst eosin Y",
+        "catalysis_system_class": "non_flavin_enzyme_external_photoredox",
         "flavin_dependency_status": "non_flavin_thdp",
         "enzyme_function_class": "ThDP-dependent benzaldehyde lyase",
         "ec_number_candidates": "",
@@ -139,24 +144,35 @@ KNOWN_PAPER_OVERRIDES = {
         "pdb_evidence": "",
     },
     "10.1038/s41929-023-01065-5": {
-        "resolution_status": "family_only",
-        "resolution_reason": "Uses flavin-dependent EREDs, but local metadata does not resolve a concrete enzyme/organism; do not infer OYE1.",
-        "specific_enzyme_names": "",
-        "parent_enzyme_names": "ERED/OYE family",
-        "canonical_enzyme": "ERED/OYE family",
+        "resolution_status": "specific_with_organism",
+        "resolution_reason": "Methods identify Saccharomyces cerevisiae old yellow enzymes OYE3s expressed in E. coli BL21(DE3) from plasmid-borne OYE3 gene.",
+        "specific_enzyme_names": "OYE3 | OYE3s | Saccharomyces cerevisiae old yellow enzyme 3",
+        "parent_enzyme_names": "OYE3",
+        "canonical_enzyme": "OYE3",
         "mutations_or_variants": "",
-        "organism_candidates": "",
-        "organism_evidence": "doi_override:ERED family, no specific organism in local metadata",
+        "organism_candidates": "Saccharomyces cerevisiae",
+        "organism_evidence": "methods:Saccharomyces cerevisiae old yellow enzymes (OYE3s)",
         "enzyme_family": "ERED/OYE",
-        "enzyme_name_original": "flavin-dependent ene-reductases (EREDs)",
-        "flavin_cofactor": "flavin unspecified; exogenous Ru(bpy)3 photosensitizer",
+        "enzyme_name_original": "Saccharomyces cerevisiae old yellow enzyme 3 (OYE3/OYE3s)",
+        "flavin_cofactor": "FMN/flavin; exogenous Ru(bpy)3 photosensitizer",
         "cofactor_class": "flavin",
-        "cofactor_detail": "flavin | Ru(bpy)3 external photocatalyst",
-        "cofactor_evidence": "doi_override:flavin-dependent ene-reductases",
-        "flavin_dependency_status": "likely_flavin_dependent",
+        "cofactor_detail": "FMN/flavin | Ru(bpy)3 external photocatalyst",
+        "cofactor_evidence": "methods:old yellow enzyme OYE3; NCBI Gene 855932:FMN binding/NADPH dehydrogenase; reaction uses Ru photosensitizer",
+        "external_photocatalyst": "Ru photosensitizer",
+        "external_photocatalyst_evidence": "methods/reaction setup:Ru photosensitizer in synergistic photoenzymatic catalysis",
+        "catalysis_system_class": "flavin_enzyme_external_photoredox",
+        "flavin_dependency_status": "confirmed_flavin_dependent",
         "enzyme_function_class": "ERED/OYE ene-reductase",
-        "ec_number_candidates": "",
-        "sequence_resolution_route": "paper_supplement_then_database",
+        "ec_number_candidates": "1.6.99.1",
+        "sequence_resolution_route": "methods_gene_name_first",
+        "uniprot_id": "P41816",
+        "ncbi_gene_id": "855932",
+        "ncbi_gene_url": "https://www.ncbi.nlm.nih.gov/gene/855932",
+        "refseq_protein": "NP_015154.1",
+        "refseq_mrna": "NM_001183985.1",
+        "genomic_accession": "NC_001148.4",
+        "expression_host": "Escherichia coli BL21(DE3)",
+        "expression_evidence": "methods:OYE3s were expressed in Escherichia coli BL21(DE3) after transformation with plasmid containing the OYE3 gene",
     },
     "10.1002/anie.202311762": {
         "cofactor_class": "flavin",
@@ -425,6 +441,8 @@ def infer_cofactor_and_function(row: Dict[str, str], names: Sequence[str]) -> Di
     text = " ".join([row_context(row), " ".join(names)]).lower()
     evidence: List[str] = []
     detail: List[str] = []
+    external_photocatalysts: List[str] = []
+    external_evidence: List[str] = []
 
     flavin_hits = []
     for label, pattern in [
@@ -452,6 +470,17 @@ def infer_cofactor_and_function(row: Dict[str, str], names: Sequence[str]) -> Di
     if non_flavin_hits:
         detail.extend(dedupe(non_flavin_hits))
         evidence.append("text:" + "/".join(dedupe(non_flavin_hits)))
+
+    for label, pattern in [
+        ("Ru photosensitizer", r"\bru\b|ru\(bpy\)|ruthenium"),
+        ("Ir photosensitizer", r"iridium|\bir photocatalyst\b|\bir photosensitizer\b"),
+        ("eosin Y", r"eosin\s*y"),
+        ("organic photosensitizer", r"organophotocatalyst|organic photocatalyst|photocatalyst"),
+    ]:
+        if re.search(pattern, text):
+            external_photocatalysts.append(label)
+    if external_photocatalysts:
+        external_evidence.append("text:" + "/".join(dedupe(external_photocatalysts)))
 
     family, function = infer_enzyme_function(row, names)
     cofactor_class = "unknown"
@@ -486,10 +515,24 @@ def infer_cofactor_and_function(row: Dict[str, str], names: Sequence[str]) -> Di
         cofactor_class = "nad(p)h_only"
         status = "unknown_or_nadph_only"
 
+    if status == "confirmed_flavin_dependent" and external_photocatalysts:
+        system_class = "flavin_enzyme_external_photoredox"
+    elif status == "likely_flavin_dependent" and external_photocatalysts:
+        system_class = "likely_flavin_enzyme_external_photoredox"
+    elif status.startswith("non_flavin_") and external_photocatalysts:
+        system_class = "non_flavin_enzyme_external_photoredox"
+    elif status in {"confirmed_flavin_dependent", "likely_flavin_dependent"}:
+        system_class = "flavin_enzyme_only_or_unclear_photoredox"
+    else:
+        system_class = "unknown"
+
     return {
         "cofactor_class": cofactor_class,
         "cofactor_detail": " | ".join(dedupe(detail)),
         "cofactor_evidence": " | ".join(dedupe(evidence)),
+        "external_photocatalyst": " | ".join(dedupe(external_photocatalysts)),
+        "external_photocatalyst_evidence": " | ".join(dedupe(external_evidence)),
+        "catalysis_system_class": system_class,
         "flavin_dependency_status": status,
         "enzyme_function_class": function,
     }
@@ -566,15 +609,25 @@ def tree_ready_row(row: Dict[str, str]) -> Dict[str, str]:
         "function_class": row.get("enzyme_function_class", ""),
         "source_organism": row.get("organism_candidates", ""),
         "uniprot_id": uniprot_ids[0] if uniprot_ids else "",
+        "ncbi_gene_id": row.get("ncbi_gene_id", ""),
+        "refseq_protein": row.get("refseq_protein", ""),
+        "refseq_mrna": row.get("refseq_mrna", ""),
+        "genomic_accession": row.get("genomic_accession", ""),
         "pdb_id": pdb_ids[0] if pdb_ids else "",
         "key_doi": row.get("doi", ""),
         "paper_title": row.get("title", ""),
         "flavin_dependency_status": row.get("flavin_dependency_status", ""),
         "cofactor_class": row.get("cofactor_class", ""),
+        "catalysis_system_class": row.get("catalysis_system_class", ""),
         "sequence_resolution_route": row.get("sequence_resolution_route", ""),
         "evidence_source": row.get("organism_evidence", ""),
         "evidence_note": row.get("resolution_reason", ""),
+        "external_photocatalyst": row.get("external_photocatalyst", ""),
+        "external_photocatalyst_evidence": row.get("external_photocatalyst_evidence", ""),
+        "expression_host": row.get("expression_host", ""),
+        "expression_evidence": row.get("expression_evidence", ""),
         "protein_query": row.get("protein_query", ""),
+        "ncbi_gene_url": row.get("ncbi_gene_url", ""),
         "uniprot_url": row.get("uniprot_entry_url") or row.get("uniprot_url", ""),
         "pdb_url": row.get("pdb_url", ""),
         "reaction_type": row.get("reaction_type", ""),
@@ -700,12 +753,19 @@ def build_candidates(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
             "journal": row.get("journal", ""),
             "search_track": row.get("search_track", ""),
             "flavin_cofactor": row.get("flavin_cofactor", ""),
+            "expression_host": row.get("expression_host", ""),
+            "expression_evidence": row.get("expression_evidence", ""),
             "reaction_type": row.get("reaction_type", ""),
             "new_to_nature_reaction": row.get("new_to_nature_reaction", ""),
             "characterized_enzyme_evidence": row.get("characterized_enzyme_evidence", ""),
             "structure_similarity_hint": row.get("structure_similarity_hint", ""),
             "criteria_status": row.get("criteria_status", ""),
             "manual_review_priority": row.get("manual_review_priority", row.get("seed_priority", "")),
+            "ncbi_gene_id": row.get("ncbi_gene_id", ""),
+            "ncbi_gene_url": row.get("ncbi_gene_url", ""),
+            "refseq_protein": row.get("refseq_protein", ""),
+            "refseq_mrna": row.get("refseq_mrna", ""),
+            "genomic_accession": row.get("genomic_accession", ""),
             "pdb_ids": " | ".join(pdb_ids),
             "pdb_evidence": " | ".join(pdb_evidence),
             "uniprot_id": row.get("uniprot_id", ""),
@@ -777,11 +837,14 @@ def dedupe_candidates(rows: Sequence[Dict[str, str]]) -> List[Dict[str, str]]:
             "specific_enzyme_names", "parent_enzyme_names", "mutations_or_variants",
             "organism_candidates", "organism_evidence", "pdb_ids", "uniprot_id",
             "pdb_evidence", "ec_number_candidates", "cofactor_detail", "cofactor_evidence",
+            "external_photocatalyst", "external_photocatalyst_evidence",
+            "expression_host", "expression_evidence",
+            "ncbi_gene_id", "ncbi_gene_url", "refseq_protein", "refseq_mrna", "genomic_accession",
         ]:
             current[field] = " | ".join(dedupe(split_multi(current.get(field, "")) + split_multi(row.get(field, ""))))
         for field in [
             "cofactor_class", "flavin_dependency_status", "enzyme_function_class",
-            "sequence_resolution_route", "pdb_url", "rcsb_search_url",
+            "sequence_resolution_route", "catalysis_system_class", "pdb_url", "rcsb_search_url",
         ]:
             if not current.get(field) and row.get(field):
                 current[field] = row[field]
@@ -843,6 +906,7 @@ def render_html(rows: Sequence[Dict[str, str]], output_path: Path) -> None:
     status_options = options_from(rows, "resolution_status", "All readiness")
     dependency_options = options_from(rows, "flavin_dependency_status", "All dependencies")
     cofactor_options = options_from(rows, "cofactor_class", "All cofactors")
+    system_options = options_from(rows, "catalysis_system_class", "All systems")
     function_options = options_from(rows, "enzyme_function_class", "All functions")
     route_options = options_from(rows, "sequence_resolution_route", "All routes")
     table_rows = "\n".join(render_row(row) for row in rows)
@@ -865,7 +929,7 @@ h1 {{ margin:0; font-size:21px; letter-spacing:0; }}
 .stat b {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
 .stat span {{ font-weight:700; color:var(--accent); }}
 .stat-total {{ background:#e8f4f3; border-color:#9ccfca; }}
-.toolbar {{ display:grid; grid-template-columns:minmax(260px, 1.6fr) repeat(6, minmax(150px, 1fr)); gap:8px; padding:10px 24px; background:rgba(238,244,247,.94); backdrop-filter:blur(8px); border-bottom:1px solid var(--line); position:sticky; top:129px; z-index:4; }}
+.toolbar {{ display:grid; grid-template-columns:minmax(260px, 1.6fr) repeat(7, minmax(145px, 1fr)); gap:8px; padding:10px 24px; background:rgba(238,244,247,.94); backdrop-filter:blur(8px); border-bottom:1px solid var(--line); position:sticky; top:129px; z-index:4; }}
 input, select {{ height:34px; min-width:0; border:1px solid var(--line); border-radius:6px; padding:0 9px; background:white; color:var(--ink); transition:border-color .16s ease, box-shadow .16s ease, transform .16s ease; }}
 input:focus, select:focus {{ outline:none; border-color:#5aa7a7; box-shadow:0 0 0 3px rgba(0, 109, 119, .14); }}
 select:hover, input:hover {{ border-color:#9bb4c8; }}
@@ -886,10 +950,13 @@ tr:hover td {{ background:#fbfdff; }}
 .likely_flavin_dependent, .specific_missing_organism {{ color:var(--blue); border-color:#9ebee1; background:#edf5ff; }}
 .mixed_or_review, .unknown, .unknown_or_nadph_only, .family_only, .review_or_family_context {{ color:var(--warn); border-color:#e4bd75; background:#fff7e6; }}
 .non_flavin_exclude, .non_flavin_thdp, .non_flavin_pqq, .non_flavin_plp, .non_flavin_heme {{ color:var(--bad); border-color:#e5a3af; background:#fff0f3; }}
-.supplement_accession_first, .pdb_first {{ color:var(--violet); border-color:#c2b5ee; background:#f3f0ff; }}
+.supplement_accession_first, .pdb_first, .methods_gene_name_first {{ color:var(--violet); border-color:#c2b5ee; background:#f3f0ff; }}
 .pdb_search_first {{ color:#5f6b7a; border-color:#cbd5e1; background:#f8fafc; }}
 .thdp {{ color:#8a4b18; border-color:#f1bf98; background:#fff2e8; }}
 .flavin {{ color:#26655a; border-color:#a4d7cb; background:#ecfbf7; }}
+.flavin_enzyme_external_photoredox, .likely_flavin_enzyme_external_photoredox {{ color:#7c3aed; border-color:#c4b5fd; background:#f5f3ff; }}
+.flavin_enzyme_only_or_unclear_photoredox {{ color:#0f766e; border-color:#99f6e4; background:#ecfeff; }}
+.non_flavin_enzyme_external_photoredox {{ color:#be123c; border-color:#fecdd3; background:#fff1f2; }}
 .small {{ color:var(--muted); font-size:12px; margin-top:3px; }}
 .title {{ width:25%; }}
 .enzyme {{ width:19%; }}
@@ -919,6 +986,7 @@ a:hover {{ text-decoration:underline; }}
   <input id="q" placeholder="Search title, enzyme, organism, DOI, reaction">
   <select id="dependency">{dependency_options}</select>
   <select id="cofactor">{cofactor_options}</select>
+  <select id="systemClass">{system_options}</select>
   <select id="functionClass">{function_options}</select>
   <select id="status">{status_options}</select>
   <select id="route">{route_options}</select>
@@ -939,6 +1007,7 @@ const q = document.getElementById('q');
 const status = document.getElementById('status');
 const dependency = document.getElementById('dependency');
 const cofactor = document.getElementById('cofactor');
+const systemClass = document.getElementById('systemClass');
 const functionClass = document.getElementById('functionClass');
 const route = document.getElementById('route');
 const pdb = document.getElementById('pdb');
@@ -949,6 +1018,7 @@ function apply() {{
     status: status.value,
     dependency: dependency.value,
     cofactor: cofactor.value,
+    systemClass: systemClass.value,
     functionClass: functionClass.value,
     route: route.value,
   }};
@@ -957,16 +1027,18 @@ function apply() {{
     const okStatus = !filters.status || row.dataset.status === filters.status;
     const okDep = !filters.dependency || row.dataset.dependency === filters.dependency;
     const okCofactor = !filters.cofactor || row.dataset.cofactor === filters.cofactor;
+    const okSystem = !filters.systemClass || row.dataset.systemClass === filters.systemClass;
     const okFunction = !filters.functionClass || row.dataset.functionClass === filters.functionClass;
     const okRoute = !filters.route || row.dataset.route === filters.route;
     const okPdb = !pdb.value || row.dataset.pdb === pdb.value;
-    row.style.display = okText && okStatus && okDep && okCofactor && okFunction && okRoute && okPdb ? '' : 'none';
+    row.style.display = okText && okStatus && okDep && okCofactor && okSystem && okFunction && okRoute && okPdb ? '' : 'none';
   }});
 }}
 q.addEventListener('input', apply);
 status.addEventListener('input', apply);
 dependency.addEventListener('input', apply);
 cofactor.addEventListener('input', apply);
+systemClass.addEventListener('input', apply);
 functionClass.addEventListener('input', apply);
 route.addEventListener('input', apply);
 pdb.addEventListener('input', apply);
@@ -988,6 +1060,7 @@ def render_row(row: Dict[str, str]) -> str:
     evidence = norm_space(row.get("evidence_summary", ""))[:520]
     dep = row.get("flavin_dependency_status", "unknown")
     cofactor = row.get("cofactor_class", "unknown")
+    system_class = row.get("catalysis_system_class", "unknown")
     function_class = row.get("enzyme_function_class", "unknown")
     route = row.get("sequence_resolution_route", "manual_literature_review")
     pdb_ids = split_multi(row.get("pdb_ids", ""))
@@ -1003,11 +1076,16 @@ def render_row(row: Dict[str, str]) -> str:
         f'<a href="https://www.uniprot.org/uniprotkb/{html.escape(uid)}/entry">UniProt {html.escape(uid)}</a>'
         for uid in uniprot_ids
     )
-    return f"""<tr data-status="{html.escape(row['resolution_status'])}" data-dependency="{html.escape(dep)}" data-cofactor="{html.escape(cofactor)}" data-function-class="{html.escape(function_class)}" data-route="{html.escape(route)}" data-pdb="{pdb_present}">
-<td><span class="pill {html.escape(dep)}">{html.escape(dep)}</span><span class="pill {html.escape(cofactor)}">{html.escape(cofactor)}</span><div class="small">{html.escape(row.get('cofactor_detail',''))}</div><div class="small">{html.escape(row.get('cofactor_evidence',''))}</div><div class="small">EC: {html.escape(row.get('ec_number_candidates',''))}</div></td>
+    ncbi_gene_link = (
+        f'<a href="{html.escape(row["ncbi_gene_url"])}">NCBI Gene {html.escape(row.get("ncbi_gene_id", ""))}</a>'
+        if row.get("ncbi_gene_url") else ""
+    )
+    route_badge = f'<span class="pill {html.escape(route)}">{html.escape(route)}</span>'
+    return f"""<tr data-status="{html.escape(row['resolution_status'])}" data-dependency="{html.escape(dep)}" data-cofactor="{html.escape(cofactor)}" data-system-class="{html.escape(system_class)}" data-function-class="{html.escape(function_class)}" data-route="{html.escape(route)}" data-pdb="{pdb_present}">
+<td><span class="pill {html.escape(dep)}">{html.escape(dep)}</span><span class="pill {html.escape(cofactor)}">{html.escape(cofactor)}</span><span class="pill {html.escape(system_class)}">{html.escape(system_class)}</span><div class="small">{html.escape(row.get('cofactor_detail',''))}</div><div class="small">{html.escape(row.get('cofactor_evidence',''))}</div><div class="small">External photocatalyst: {html.escape(row.get('external_photocatalyst',''))}</div><div class="small">{html.escape(row.get('external_photocatalyst_evidence',''))}</div><div class="small">EC: {html.escape(row.get('ec_number_candidates',''))}</div></td>
 <td class="enzyme"><b>{html.escape(row.get('canonical_enzyme') or row.get('specific_enzyme_names') or row.get('enzyme_name_original',''))}</b><div class="small">Names: {html.escape(row.get('specific_enzyme_names',''))}</div><div class="small">Parent: {html.escape(row.get('parent_enzyme_names',''))}</div><div class="small">Variants: {html.escape(row.get('mutations_or_variants',''))}</div><div class="small">Function: {html.escape(function_class)}</div><div class="small">Family: {html.escape(row.get('enzyme_family',''))}</div></td>
-<td><span class="pill {html.escape(row['resolution_status'])}">{html.escape(row['resolution_status'])}</span><div class="small">{html.escape(row['resolution_reason'])}</div><b>{html.escape(row.get('organism_candidates',''))}</b><div class="small">{html.escape(row.get('organism_evidence',''))}</div><div class="small">Route: {html.escape(route)}</div></td>
-<td class="links">{uniprot_id_links}<a href="{html.escape(row['uniprot_url'])}">UniProt search</a><a href="{html.escape(row['ncbi_protein_url'])}">NCBI Protein</a><a href="{html.escape(row['ncbi_nucleotide_url'])}">NCBI Nucleotide/gene</a><a href="{html.escape(row['ena_url'])}">ENA text search</a>{pdb_links}<div class="small">Protein: {html.escape(row.get('protein_query',''))}</div><div class="small">DNA: {html.escape(row.get('dna_query',''))}</div></td>
+<td><span class="pill {html.escape(row['resolution_status'])}">{html.escape(row['resolution_status'])}</span>{route_badge}<div class="small">{html.escape(row['resolution_reason'])}</div><b>{html.escape(row.get('organism_candidates',''))}</b><div class="small">{html.escape(row.get('organism_evidence',''))}</div><div class="small">Expression host: {html.escape(row.get('expression_host',''))}</div><div class="small">{html.escape(row.get('expression_evidence',''))}</div></td>
+<td class="links">{uniprot_id_links}{ncbi_gene_link}<a href="{html.escape(row['uniprot_url'])}">UniProt search</a><a href="{html.escape(row['ncbi_protein_url'])}">NCBI Protein</a><a href="{html.escape(row['ncbi_nucleotide_url'])}">NCBI Nucleotide/gene</a><a href="{html.escape(row['ena_url'])}">ENA text search</a>{pdb_links}<div class="small">Protein: {html.escape(row.get('protein_query',''))}</div><div class="small">DNA: {html.escape(row.get('dna_query',''))}</div><div class="small">RefSeq protein: {html.escape(row.get('refseq_protein',''))}</div><div class="small">RefSeq mRNA: {html.escape(row.get('refseq_mrna',''))}</div><div class="small">Genomic: {html.escape(row.get('genomic_accession',''))}</div></td>
 <td class="title"><b>{html.escape(row.get('title',''))}</b><div>{doi_link}</div><div class="small">{html.escape(str(row.get('year','')))} {html.escape(row.get('journal',''))}</div><div class="evidence small">{html.escape(evidence)}</div></td>
 <td>{html.escape(row.get('reaction_type',''))}<div class="small">new-to-nature={html.escape(str(row.get('new_to_nature_reaction','')))}</div><div class="small">{html.escape(row.get('characterized_enzyme_evidence',''))}</div><div class="small">{html.escape(row.get('structure_similarity_hint',''))}</div></td>
 </tr>"""
@@ -1032,9 +1110,11 @@ def write_xlsx(path: Path, rows: Sequence[Dict[str, str]], fields: Sequence[str]
 
     tree_fields = [
         "seed_rank", "include_in_core_fasta", "enzyme_short_name", "family", "function_class",
-        "source_organism", "uniprot_id", "pdb_id", "key_doi", "paper_title",
-        "flavin_dependency_status", "cofactor_class", "sequence_resolution_route",
-        "evidence_source", "evidence_note", "protein_query", "uniprot_url", "pdb_url",
+        "source_organism", "uniprot_id", "ncbi_gene_id", "refseq_protein", "refseq_mrna",
+        "genomic_accession", "pdb_id", "key_doi", "paper_title",
+        "flavin_dependency_status", "cofactor_class", "catalysis_system_class", "sequence_resolution_route",
+        "evidence_source", "evidence_note", "external_photocatalyst", "external_photocatalyst_evidence",
+        "expression_host", "expression_evidence", "protein_query", "ncbi_gene_url", "uniprot_url", "pdb_url",
         "reaction_type", "new_to_nature_reaction", "manual_notes",
     ]
     add_sheet(wb, "tree_ready_core", tree_rows, tree_fields, freeze="A2")
@@ -1096,7 +1176,7 @@ def preferred_widths(ws) -> List[int]:
     for col in ws.iter_cols():
         header = str(col[0].value or "")
         max_len = max([len(str(cell.value or "")) for cell in col[:80]] + [len(header)])
-        if header in {"paper_title", "evidence_summary", "evidence_note", "evidence_source"}:
+        if header in {"paper_title", "evidence_summary", "evidence_note", "evidence_source", "external_photocatalyst_evidence", "expression_evidence"}:
             widths.append(min(max(max_len + 2, 28), 58))
         elif header.endswith("_url"):
             widths.append(32)
@@ -1127,11 +1207,13 @@ def main() -> None:
         "organism_evidence", "protein_query", "dna_query", "uniprot_url",
         "ncbi_protein_url", "ncbi_nucleotide_url", "ena_url", "pdb_url", "rcsb_search_url", "uniprot_entry_url",
         "cofactor_class", "cofactor_detail", "cofactor_evidence", "flavin_dependency_status",
+        "external_photocatalyst", "external_photocatalyst_evidence", "catalysis_system_class",
         "enzyme_function_class", "ec_number_candidates", "sequence_resolution_route", "enzyme_family",
         "enzyme_name_original", "doi", "title", "year", "journal", "search_track",
-        "flavin_cofactor", "reaction_type", "new_to_nature_reaction",
+        "flavin_cofactor", "expression_host", "expression_evidence", "reaction_type", "new_to_nature_reaction",
         "characterized_enzyme_evidence", "structure_similarity_hint", "criteria_status",
-        "manual_review_priority", "pdb_ids", "pdb_evidence", "uniprot_id", "evidence_summary",
+        "manual_review_priority", "ncbi_gene_id", "ncbi_gene_url", "refseq_protein", "refseq_mrna",
+        "genomic_accession", "pdb_ids", "pdb_evidence", "uniprot_id", "evidence_summary",
     ]
     csv_path = outdir / f"{args.prefix}_candidates.csv"
     tree_csv_path = outdir / f"{args.prefix}_tree_ready.csv"
@@ -1140,9 +1222,11 @@ def main() -> None:
     write_csv(csv_path, rows, fields)
     tree_fields = [
         "seed_rank", "include_in_core_fasta", "enzyme_short_name", "family", "function_class",
-        "source_organism", "uniprot_id", "pdb_id", "key_doi", "paper_title",
-        "flavin_dependency_status", "cofactor_class", "sequence_resolution_route",
-        "evidence_source", "evidence_note", "protein_query", "uniprot_url", "pdb_url",
+        "source_organism", "uniprot_id", "ncbi_gene_id", "refseq_protein", "refseq_mrna",
+        "genomic_accession", "pdb_id", "key_doi", "paper_title",
+        "flavin_dependency_status", "cofactor_class", "catalysis_system_class", "sequence_resolution_route",
+        "evidence_source", "evidence_note", "external_photocatalyst", "external_photocatalyst_evidence",
+        "expression_host", "expression_evidence", "protein_query", "ncbi_gene_url", "uniprot_url", "pdb_url",
         "reaction_type", "new_to_nature_reaction", "manual_notes",
     ]
     write_csv(tree_csv_path, build_tree_ready_rows(rows), tree_fields)

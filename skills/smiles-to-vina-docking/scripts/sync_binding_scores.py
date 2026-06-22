@@ -17,8 +17,7 @@ import dock_utils as dl
 ANALYSIS_FIELDS = [
     "seq_id",
     "nickname",
-    "input_smiles",
-    "canonical_smiles",
+    "smiles",
     "official_binding_score",
     "affinity_kcal_mol",
     "mode_count",
@@ -254,7 +253,7 @@ def match_scores(
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     history_by_canonical: dict[str, list[dict[str, str]]] = {}
     for row in rows:
-        can = row.get("canonical_smiles", "")
+        can = dl.canonical(dl.row_smiles(row) or row.get("canonical_smiles", ""))
         if can:
             history_by_canonical.setdefault(can, []).append(row)
 
@@ -285,7 +284,7 @@ def match_scores(
             history_matches,
             key=lambda row: float(row.get("affinity_kcal_mol") or 999.0),
         )
-        matched.append(analysis_row)
+        matched.append({**analysis_row, "smiles": dl.row_smiles(analysis_row)})
     return matched, missing
 
 

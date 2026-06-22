@@ -53,7 +53,7 @@ except ImportError as _e:
 
 # ==================== 配置区 ====================
 LLM_CONFIG = {
-    "api_key": os.getenv("KIMI_API_KEY") or os.getenv("MOONSHOT_API_KEY") or "",
+    "api_key": os.getenv("KIMI_API_KEY") or os.getenv("MOONSHOT_API_KEY") or os.getenv("KIMI_API") or "",
     "base_url": os.getenv("MOONSHOT_BASE_URL") or "https://api.moonshot.cn/v1",
     "model": "kimi-k2.6",  
     "temperature": 1,
@@ -136,6 +136,29 @@ SCHEMA_PROFILES = {
         "future_direction": "下一步可追踪方向，特别是是否应找同源flavin酶或结构相似酶(中文一句话)",
         "confidence": "提取置信度: 0.0-1.0"
     },
+    "nonheme-iron": {
+        "paper_domain": "Literature domain: [nonheme_iron_chemoenzymatic | nonheme_iron_engineering | nonheme_iron_characterization_relevant | metal_substituted_nonheme_iron_lineage | native_biosynthesis_background | not_nonheme_iron_enzyme | no_enzyme_or_unrelated]",
+        "nonheme_iron_status": "Non-heme/non-haem/nonheme iron enzyme status: [confirmed_nonheme_iron | likely_nonheme_iron | metal_substituted_nonheme_iron_lineage | not_nonheme_iron | unclear]",
+        "enzyme_family": "Main enzyme family from the non-heme iron redox-enzyme lineage perspective: [nonheme_iron_oxidoreductase | 2OG_alphaKG_dependent_dioxygenase | nonheme_iron_hydroxylase | nonheme_iron_halogenase | Rieske_nonheme_iron_oxygenase | mononuclear_nonheme_iron_enzyme | dinuclear_nonheme_iron_enzyme | nonheme_iron_synthase_or_lyase | metal_substituted_nonheme_iron_lineage | not_nonheme_iron_enzyme | no_enzyme | unclear]",
+        "specific_enzyme_name_or_family": "Specific enzyme/family/variant, e.g. BesD, SadX, SyrB2, WelO5, Rieske oxygenase, IPNS, HppE, EFE, ACCO; otherwise unclear",
+        "metal_center": "Metal center: [Fe(II) | Fe(III) | nonheme iron unspecified | Cu-substituted | Co-substituted | Ni-substituted | Mn-substituted | other metal-substituted | unclear]",
+        "chemoenzymatic_relevance": "Relevance to chemoenzymatic synthesis/biocatalysis: [direct_chemoenzymatic_application | enzyme_engineering_for_synthesis | potential_biocatalytic_platform | native_biosynthesis_only | unrelated]",
+        "new_to_nature_reaction": "Whether the reaction is non-natural/abiological/new-to-nature: [true | false | unclear]",
+        "reaction_type": "Reaction type: [C-H amination | nitrene transfer | aziridination | C-H azidation | nitrile installation | fluorination | halogenation | hydroxylation | oxidative rearrangement | radical relay C-H functionalization | olefin functionalization | C-N bond formation | C-F bond formation | C-X bond formation | native oxidation | other | unclear]",
+        "bond_formation": "Key bond made/broken: [C-H | C-N | C-F | C-Cl | C-Br | C-I | C-O | C-C | C-S | C-X | rearrangement | redox only | unclear]",
+        "engineering_mode": "Engineering/use mode: [directed evolution | rational design | substrate engineering | metal substitution | small-molecule ligand assistance | wild-type promiscuity | characterization only | unclear]",
+        "evidence_level": "Evidence strength: [substrate scope | kinetics | crystal structure/PDB | mutagenesis | mechanistic spectroscopy | isotope/radical probe | activity assay only | review/background only | unclear]",
+        "include_in_main_set": "Include in main candidate set: [yes | borderline | no]",
+        "exclusion_reason": "If include_in_main_set=no, explain: heme/P450, flavin-only, PLP-only, aldolase, hydrolase, pure photoredox, native biosynthesis only, review, no enzyme, or not nonheme iron lineage",
+        "manual_review_priority": "Manual review priority: [high | medium | low]",
+        "metadata_keywords": "API/database keywords, subjects, concepts, separated by |",
+        "is_blacklisted": "Should be excluded from final annotation set: [true | false]",
+        "blacklist_reason": "If true, explain why. Papers outside explicit non-heme/non-haem/nonheme iron redox-enzyme lineage should be excluded.",
+        "key_innovation": "Core innovation in one Chinese sentence",
+        "limitation": "Limitation in one Chinese sentence",
+        "future_direction": "Follow-up direction in one Chinese sentence",
+        "confidence": "Extraction confidence: 0.0-1.0"
+    },
     "lipase": {
         "topic_domain": "主题领域: [光酶催化 | 光氧化还原化学 | 脂肪酶/酯酶催化 | alpha/beta水解酶 | 自由基化学 | 其他]",
         "enzyme_category": "酶催化类型: [天然酶 | 工程化酶 | 协同光催化/酶催化 | 无酶小分子光催化 | 不涉及酶 | 未明确]",
@@ -199,6 +222,40 @@ KNOWN_ENZYME_FAMILIES = {
     "hydrolase", "oxidase", "reductase", "engineered enzyme",
 }
 
+NONHEME_IRON_FAMILIES = {
+    "nonheme_iron_oxidoreductase",
+    "2OG_alphaKG_dependent_dioxygenase",
+    "nonheme_iron_hydroxylase",
+    "nonheme_iron_halogenase",
+    "Rieske_nonheme_iron_oxygenase",
+    "mononuclear_nonheme_iron_enzyme",
+    "dinuclear_nonheme_iron_enzyme",
+    "nonheme_iron_synthase_or_lyase",
+    "metal_substituted_nonheme_iron_lineage",
+}
+
+NONHEME_IRON_POSITIVE_TERMS = [
+    "non-heme", "nonheme", "non-haem", "nonhaem",
+    "non heme", "non haem", "non-heme iron", "nonheme iron",
+    "non-haem iron", "nonhaem iron",
+]
+
+NONHEME_IRON_LINEAGE_TERMS = [
+    "2-oxoglutarate", "2 oxoglutarate", "2og", "alpha-ketoglutarate",
+    "alpha ketoglutarate", "alpha-kg", "alphakg", "fe(ii)/2-oxoglutarate",
+    "fe(ii)/alpha-ketoglutarate", "fe( ii )/2-oxoglutarate",
+    "rieske", "mononuclear iron", "dinuclear iron", "iron-dependent oxygenase",
+    "iron dependent oxygenase", "iron-dependent dioxygenase",
+]
+
+NONHEME_IRON_EXCLUSION_TERMS = [
+    "aldolase", "threonine aldolase", "serine hydrolase", "hydrolase",
+    "lipase", "esterase", "p450", "cytochrome p450", "heme enzyme",
+    "haem enzyme", "flavin", "fmn", "fad", "plp", "pyridoxal phosphate",
+    "ered", "old yellow enzyme", "photoredox", "photocatalysis",
+    "organic photocatalyst", "ruthenium", "iridium",
+]
+
 CLASSIFICATION_FIELDS = {
     "topic_domain",
     "paper_domain",
@@ -212,6 +269,14 @@ CLASSIFICATION_FIELDS = {
     "characterized_enzyme_evidence",
     "candidate_for_photoenzyme_repurposing",
     "structure_similarity_hint",
+    "nonheme_iron_status",
+    "specific_enzyme_name_or_family",
+    "metal_center",
+    "chemoenzymatic_relevance",
+    "engineering_mode",
+    "evidence_level",
+    "include_in_main_set",
+    "exclusion_reason",
     "radical_or_excited_state_mechanism",
     "radical_mechanism",
     "radical_source",
@@ -345,6 +410,26 @@ CRITERIA_SYNONYM_GROUPS = {
         "PDB",
         "mutagenesis",
     ],
+    "nonheme_iron": [
+        "non-heme",
+        "nonheme",
+        "non-haem",
+        "nonhaem",
+        "non-heme iron",
+        "nonheme iron",
+        "non-haem iron",
+        "nonhaem iron",
+        "non-heme iron-dependent",
+        "nonheme iron-dependent",
+        "Fe(II)/2-oxoglutarate",
+        "Fe(II)/alpha-ketoglutarate",
+        "2-oxoglutarate-dependent",
+        "2OG-dependent",
+        "alpha-ketoglutarate-dependent",
+        "Rieske oxygenase",
+        "mononuclear non-heme iron",
+        "dinuclear non-heme iron",
+    ],
 }
 
 
@@ -387,6 +472,9 @@ def expand_criteria_terms(raw_value: str, kind: str = "") -> List[str]:
         add_group("flavin")
     if any(k in raw for k in ["黄素", "黄素依赖", "黄素辅酶"]):
         add_group("flavin")
+
+    if any(k in low for k in ["non-heme", "nonheme", "non-haem", "nonhaem", "2-oxoglutarate", "alpha-ketoglutarate", "rieske"]):
+        add_group("nonheme_iron")
 
     if any(k in low for k in ["new-to-nature", "new to nature", "non-natural", "nonnatural", "unnatural", "abiological", "non-native"]):
         add_group("new_to_nature")
@@ -440,6 +528,66 @@ def term_hits_in_text(terms: List[str], text: str) -> List[str]:
         if found:
             hits.append(term)
     return dedupe_preserve_order(hits)
+
+
+def is_nonheme_iron_schema(schema: Dict[str, str]) -> bool:
+    return "nonheme_iron_status" in (schema or {})
+
+
+def nonheme_iron_text_status(text: str) -> str:
+    norm = normalize_match_text(text)
+    has_explicit_nonheme = any(term in norm for term in NONHEME_IRON_POSITIVE_TERMS)
+    has_lineage = any(term in norm for term in NONHEME_IRON_LINEAGE_TERMS)
+    has_metal_substitution = any(
+        term in norm
+        for term in [
+            "metal substitution", "metal-substituted", "cu-substituted",
+            "co-substituted", "ni-substituted", "mn-substituted",
+            "copper-substituted", "cobalt-substituted", "nickel-substituted",
+            "manganese-substituted",
+        ]
+    )
+    if has_explicit_nonheme:
+        return "confirmed_nonheme_iron"
+    if has_lineage and has_metal_substitution:
+        return "metal_substituted_nonheme_iron_lineage"
+    if has_lineage:
+        return "likely_nonheme_iron"
+    return "not_nonheme_iron"
+
+
+def classify_nonheme_iron_family(text: str) -> str:
+    norm = normalize_match_text(text)
+    status = nonheme_iron_text_status(norm)
+    if status == "not_nonheme_iron":
+        return "not_nonheme_iron_enzyme"
+    if status == "metal_substituted_nonheme_iron_lineage":
+        return "metal_substituted_nonheme_iron_lineage"
+    if any(term in norm for term in ["2-oxoglutarate", "2 oxoglutarate", "2og", "alpha-ketoglutarate", "alpha ketoglutarate", "alpha-kg"]):
+        return "2OG_alphaKG_dependent_dioxygenase"
+    if "rieske" in norm:
+        return "Rieske_nonheme_iron_oxygenase"
+    if "halogenase" in norm or "halogenation" in norm or "chlorination" in norm or "bromination" in norm:
+        return "nonheme_iron_halogenase"
+    if "hydroxylase" in norm or "hydroxylation" in norm:
+        return "nonheme_iron_hydroxylase"
+    if any(term in norm for term in ["dinuclear", "diiron", "di-iron"]):
+        return "dinuclear_nonheme_iron_enzyme"
+    if any(term in norm for term in ["mononuclear", "mono-nuclear"]):
+        return "mononuclear_nonheme_iron_enzyme"
+    if "synthase" in norm or "lyase" in norm:
+        return "nonheme_iron_synthase_or_lyase"
+    return "nonheme_iron_oxidoreductase"
+
+
+def nonheme_iron_exclusion_reason(text: str) -> str:
+    norm = normalize_match_text(text)
+    if nonheme_iron_text_status(norm) != "not_nonheme_iron":
+        return ""
+    for term in NONHEME_IRON_EXCLUSION_TERMS:
+        if term in norm:
+            return f"excluded non-target enzyme or chemistry: {term}"
+    return "missing explicit non-heme/nonhaem/nonheme iron enzyme lineage evidence"
 
 
 def criteria_context_for_paper(paper: "PaperNode") -> str:
@@ -647,6 +795,8 @@ def query_anchor_from_text(raw_value: str, preferred_group: str = "") -> str:
     low = normalize_match_text(raw)
     if not raw:
         return ""
+    if any(k in low for k in ["non-heme", "nonheme", "non-haem", "nonhaem"]):
+        return '"non-heme" OR nonheme OR "non-haem" OR nonhaem'
     if preferred_group == "field" and any(k in low for k in ["photoenzym", "photoenzyme", "photobiocatal"]):
         return '"photoenzymatic"'
     if preferred_group == "enzyme" and any(k in low for k in ["flavin", "fad", "fmn", "yellow enzyme", "flavo"]):
@@ -793,6 +943,15 @@ def should_blacklist_paper(paper: PaperNode) -> Tuple[bool, str]:
 
     family = normalize_enzyme_family(tag_get(paper.tags, "enzyme_family"), paper.title, paper.abstract)
     paper_domain = tag_get(paper.tags, "paper_domain", default="")
+    if "nonheme_iron_status" in paper.tags or "include_in_main_set" in paper.tags:
+        status = tag_get(paper.tags, "nonheme_iron_status", default="")
+        include = tag_get(paper.tags, "include_in_main_set", default="")
+        if include == "no":
+            return True, tag_get(paper.tags, "exclusion_reason", default="include_in_main_set=no")
+        if status not in {"confirmed_nonheme_iron", "likely_nonheme_iron", "metal_substituted_nonheme_iron_lineage"}:
+            return True, tag_get(paper.tags, "blacklist_reason", default="not nonheme iron lineage")
+        if family in {"not_nonheme_iron_enzyme", "no_enzyme", "no enzyme"}:
+            return True, "not nonheme iron enzyme"
     if paper_domain == "unrelated/blacklist":
         return True, "paper_domain=unrelated/blacklist"
     if paper_domain == "organic synthesis no-enzyme":
@@ -966,6 +1125,14 @@ def should_run_llm_for_paper(paper: PaperNode, base_tags: Dict[str, str], scope:
         if criteria_status in {"criteria_pass", "criteria_borderline"}:
             family = tag_get(base_tags, "enzyme_family")
             domain = tag_get(base_tags, "paper_domain")
+            if "nonheme_iron_status" in base_tags or "include_in_main_set" in base_tags:
+                return (
+                    family in {"not_nonheme_iron_enzyme", "unclear", "no_enzyme", "no enzyme"}
+                    or tag_get(base_tags, "nonheme_iron_status", default="") in {"", "unclear", "not_nonheme_iron"}
+                    or tag_get(base_tags, "include_in_main_set", default="") in {"", "unclear", "borderline"}
+                    or domain in {"", "unclear", "not_nonheme_iron_enzyme"}
+                    or is_empty_tag(paper.abstract)
+                )
             return (
                 is_other_enzyme_family(family)
                 or family in {"Other_enzyme", "unclear", "no enzyme"}
@@ -2081,11 +2248,21 @@ def write_task_spec(output_dir: Path, schema_profile: str, task_prompt: str, sea
         "",
         "## Operational Interpretation",
         "",
-        "- First collect papers where flavin/FAD/FMN-dependent enzymes have already been used for photoenzymatic or light-driven new-to-nature reactions.",
-        "- Then collect characterized flavin enzymes with enzyme assays, structures, kinetics, or substrate scope that have not yet been applied in recent photoenzymatic synthesis.",
-        "- Deprioritize genome-only annotations and papers with no enzyme evidence.",
-        "- Treat DOI/PMID/title metadata as discovery seeds; use citation/reference expansion and explicit keyword searches to find missed landmarks.",
     ]
+    if schema_profile == "nonheme-iron":
+        lines.extend([
+            "- The hard scope is non-heme/non-haem/nonheme iron-dependent redox enzyme lineage, not generic non-heme enzymes.",
+            "- Keep Fe(II)/2OG, alpha-ketoglutarate-dependent dioxygenases, Rieske oxygenases, non-heme iron halogenases/hydroxylases, and metal-substituted derivatives only when the parent lineage is non-heme iron.",
+            "- Exclude aldolase, hydrolase, P450/heme, flavin-only, PLP-only, pure photoredox/photocatalysis, no-enzyme, and generic native-biosynthesis/review papers from the main set.",
+            "- Use citation/reference expansion plus explicit keyword searches because Semantic Scholar may miss papers that Google Scholar finds by keyword overlap.",
+        ])
+    else:
+        lines.extend([
+            "- First collect papers where flavin/FAD/FMN-dependent enzymes have already been used for photoenzymatic or light-driven new-to-nature reactions.",
+            "- Then collect characterized flavin enzymes with enzyme assays, structures, kinetics, or substrate scope that have not yet been applied in recent photoenzymatic synthesis.",
+            "- Deprioritize genome-only annotations and papers with no enzyme evidence.",
+            "- Treat DOI/PMID/title metadata as discovery seeds; use citation/reference expansion and explicit keyword searches to find missed landmarks.",
+        ])
     if search_queries:
         lines.extend(["", "## Search Queries", ""])
         lines.extend(f"- {q}" for q in search_queries)
@@ -2126,6 +2303,25 @@ def write_criteria_spec(output_dir: Path, criteria: ResearchCriteria, search_que
 
 def default_search_queries_for_task(schema_profile: str, task_prompt: str) -> List[str]:
     text = f"{schema_profile} {task_prompt}".lower()
+    if schema_profile == "nonheme-iron" or any(
+        k in text for k in ["non-heme", "nonheme", "non-haem", "nonhaem", "non heme", "non haem"]
+    ):
+        return [
+            '"non-heme" enzyme chemoenzymatic',
+            '"nonheme" enzyme chemoenzymatic',
+            '"non-haem" enzyme biocatalysis',
+            '"nonheme iron" coupling chemoenzymatic',
+            '"non-heme iron" enzyme coupling',
+            '"nonheme iron" enzyme engineering',
+            '"nonheme iron" directed evolution',
+            '"nonheme iron" new-to-nature',
+            '"nonheme iron" nitrene transfer',
+            '"nonheme iron" C-H azidation',
+            '"nonheme iron" fluorination',
+            '"2-oxoglutarate-dependent" enzyme engineering',
+            '"alpha-ketoglutarate-dependent" dioxygenase directed evolution',
+            '"Rieske oxygenase" biocatalysis',
+        ]
     if "flavin" not in text and "fad" not in text and "fmn" not in text and "yellow enzyme" not in text:
         return []
     if schema_profile == "flavin-photoenzyme" and not any(
@@ -2352,6 +2548,59 @@ class LLMExtractor:
             return fallback_tags
             
         schema_desc = "\n".join([f"- {k}: {v}" for k, v in self.schema.items()])
+        if is_nonheme_iron_schema(self.schema):
+            task_block = f"\n\nUser research objective:\n{self.task_prompt}\n" if self.task_prompt else ""
+            prompt = f"""You are a literature-screening expert for non-heme/non-haem/nonheme iron-dependent enzyme chemistry, enzyme engineering, and chemoenzymatic biocatalysis.
+
+The target is NOT generic non-heme enzymes. Keep only papers whose title/abstract/metadata explicitly support the non-heme iron enzyme lineage, including non-heme iron-dependent enzymes, Fe(II)/2-oxoglutarate enzymes, alpha-ketoglutarate/2OG dioxygenases, Rieske oxygenases, non-heme iron halogenases/hydroxylases, mononuclear/dinuclear non-heme iron enzymes, or metal-substituted derivatives of that lineage.
+
+Hard exclusion rules:
+1. Exclude aldolase, hydrolase, lipase/esterase, P450/heme, flavin-only, PLP-only, ERED/OYE, no-enzyme, pure photoredox/photocatalysis, small-molecule metal catalysis, and generic native-biosynthesis/review papers unless the abstract explicitly frames the enzyme as a non-heme iron enzyme.
+2. Photo/photoredox language is not a positive signal for this task. It is a negative signal unless the paper is explicitly about non-heme iron enzymes.
+3. If non-heme/nonhaem/nonheme iron lineage evidence is missing, set include_in_main_set=no, is_blacklisted=true, and explain the exclusion.
+4. Metal substitution with Cu/Ni/Co/Mn is relevant only when the parent enzyme family is explicitly non-heme iron-dependent.
+5. Do not return generic enzyme_family labels such as aldolase, hydrolase, P450, synthase, dioxygenase, hydroxylase, or halogenase. Use the non-heme iron lineage labels from the schema.
+{task_block}
+Title: {title}
+Journal: {journal}
+Abstract and metadata: {abstract}
+
+Extraction schema. Return only valid JSON and include every key:
+{schema_desc}
+
+Notes:
+- Use confirmed_nonheme_iron only with explicit non-heme/nonhaem/nonheme iron evidence.
+- Use likely_nonheme_iron for strong Fe(II)/2OG, alpha-ketoglutarate, Rieske, mononuclear/dinuclear iron enzyme evidence.
+- Use not_nonheme_iron and blacklist for PLP, aldolase, hydrolase, P450/heme, flavin-only, or generic enzymes.
+- key_innovation/limitation/future_direction should be concise Chinese sentences.
+"""
+            try:
+                result = self._chat_json(prompt)
+                for k in self.schema.keys():
+                    if k not in result:
+                        result[k] = "unclear" if k in CLASSIFICATION_FIELDS else "N/A"
+                return merge_with_fallback(result, fallback_tags, self.schema)
+            except requests.exceptions.ReadTimeout as e:
+                print(
+                    f"  LLM鎻愬彇瓒呮椂: 绛夊緟妯″瀷杈撳嚭瓒呰繃 {self.config.get('read_timeout', 360)} 绉掋€?"
+                    "鍙皟楂?--read-timeout锛屾垨闄嶄綆 --max-tokens/缂╃煭鎽樿杈撳叆銆?"
+                )
+                return fallback_tags
+            except requests.exceptions.ConnectTimeout as e:
+                print(
+                    f"  LLM杩炴帴瓒呮椂: 杩炴帴API瓒呰繃 {self.config.get('connect_timeout', 15)} 绉掋€?"
+                    "璇锋鏌ョ綉缁溿€乥ase-url鎴栦唬鐞嗐€?"
+                )
+                return fallback_tags
+            except Exception as e:
+                detail = ""
+                if "resp" in locals():
+                    try:
+                        detail = f" | 鍝嶅簲: {resp.text[:500]}"
+                    except Exception:
+                        pass
+                print(f"  LLM鎻愬彇澶辫触: {e}{detail}")
+                return fallback_tags
         task_block = ""
         if self.task_prompt:
             task_block = f"""
@@ -3525,6 +3774,8 @@ def main():
                     discovery_tags = dict(p.tags)
                     if args.schema_profile == "flavin-photoenzyme":
                         refined = extractor.resolve_flavin_enzyme_family(p)
+                    elif args.schema_profile == "nonheme-iron":
+                        refined = extractor.extract(p.title, build_extraction_context(p), p.journal)
                     else:
                         refined = extractor.resolve_other_enzyme(p)
                     p.tags = {**discovery_tags, **refined}
@@ -3685,11 +3936,132 @@ def _detect_enzyme_family(text: str) -> str:
     return 'no enzyme' if not enzyme_context else 'Other_enzyme'
 
 
+def fallback_extract_nonheme_iron(title: str, abstract: str, schema: Dict[str, str]) -> Dict[str, str]:
+    text = (title + " " + abstract).lower()
+    status = nonheme_iron_text_status(text)
+    family = classify_nonheme_iron_family(text)
+    exclusion = nonheme_iron_exclusion_reason(text)
+    keep = status in {"confirmed_nonheme_iron", "likely_nonheme_iron", "metal_substituted_nonheme_iron_lineage"} and not exclusion
+    borderline = status == "likely_nonheme_iron"
+
+    tags = {}
+    if "nonheme_iron_status" in schema:
+        tags["nonheme_iron_status"] = status
+    if "enzyme_family" in schema:
+        tags["enzyme_family"] = family if keep or borderline else "not_nonheme_iron_enzyme"
+    if "paper_domain" in schema:
+        if status == "metal_substituted_nonheme_iron_lineage":
+            tags["paper_domain"] = "metal_substituted_nonheme_iron_lineage"
+        elif keep:
+            tags["paper_domain"] = "nonheme_iron_engineering" if any(k in text for k in ["engineer", "directed evolution", "rational design", "variant", "mutant"]) else "nonheme_iron_characterization_relevant"
+        else:
+            tags["paper_domain"] = "not_nonheme_iron_enzyme"
+    if "metal_center" in schema:
+        if "cu-substituted" in text or "copper-substituted" in text:
+            tags["metal_center"] = "Cu-substituted"
+        elif "co-substituted" in text or "cobalt-substituted" in text:
+            tags["metal_center"] = "Co-substituted"
+        elif "ni-substituted" in text or "nickel-substituted" in text:
+            tags["metal_center"] = "Ni-substituted"
+        elif "mn-substituted" in text or "manganese-substituted" in text:
+            tags["metal_center"] = "Mn-substituted"
+        elif "fe(iii)" in text:
+            tags["metal_center"] = "Fe(III)"
+        elif "fe(ii)" in text or "ferrous" in text:
+            tags["metal_center"] = "Fe(II)"
+        elif keep or borderline:
+            tags["metal_center"] = "nonheme iron unspecified"
+        else:
+            tags["metal_center"] = "unclear"
+    if "chemoenzymatic_relevance" in schema:
+        if any(k in text for k in ["chemoenzymatic", "biocatalysis", "biocatalytic", "synthetic", "synthesis", "new-to-nature", "abiological", "non-native"]):
+            tags["chemoenzymatic_relevance"] = "direct_chemoenzymatic_application"
+        elif any(k in text for k in ["engineer", "directed evolution", "rational design", "variant", "mutant"]):
+            tags["chemoenzymatic_relevance"] = "enzyme_engineering_for_synthesis"
+        elif keep or borderline:
+            tags["chemoenzymatic_relevance"] = "potential_biocatalytic_platform"
+        else:
+            tags["chemoenzymatic_relevance"] = "unrelated"
+    if "reaction_type" in schema:
+        if "azidation" in text:
+            tags["reaction_type"] = "C-H azidation"
+        elif "nitrene" in text:
+            tags["reaction_type"] = "nitrene transfer"
+        elif "amination" in text or "aminat" in text:
+            tags["reaction_type"] = "C-H amination"
+        elif "aziridination" in text:
+            tags["reaction_type"] = "aziridination"
+        elif "fluorination" in text or "fluorinat" in text:
+            tags["reaction_type"] = "fluorination"
+        elif "halogenation" in text or "chlorination" in text or "bromination" in text:
+            tags["reaction_type"] = "halogenation"
+        elif "hydroxylation" in text:
+            tags["reaction_type"] = "hydroxylation"
+        elif "nitrile" in text:
+            tags["reaction_type"] = "nitrile installation"
+        elif "coupling" in text:
+            tags["reaction_type"] = "radical relay C-H functionalization"
+        else:
+            tags["reaction_type"] = "native oxidation" if keep else "unclear"
+    if "engineering_mode" in schema:
+        if "directed evolution" in text:
+            tags["engineering_mode"] = "directed evolution"
+        elif "rational design" in text:
+            tags["engineering_mode"] = "rational design"
+        elif "metal substitution" in text or "substituted" in text:
+            tags["engineering_mode"] = "metal substitution"
+        elif "ligand" in text:
+            tags["engineering_mode"] = "small-molecule ligand assistance"
+        elif "mutant" in text or "variant" in text or "engineer" in text:
+            tags["engineering_mode"] = "directed evolution"
+        else:
+            tags["engineering_mode"] = "unclear"
+    if "evidence_level" in schema:
+        if "substrate scope" in text:
+            tags["evidence_level"] = "substrate scope"
+        elif "kinetic" in text or "kcat" in text or "km " in text:
+            tags["evidence_level"] = "kinetics"
+        elif "crystal structure" in text or "pdb" in text or "x-ray" in text:
+            tags["evidence_level"] = "crystal structure/PDB"
+        elif "mutagenesis" in text or "mutant" in text or "variant" in text:
+            tags["evidence_level"] = "mutagenesis"
+        elif "review" in text:
+            tags["evidence_level"] = "review/background only"
+        else:
+            tags["evidence_level"] = "unclear"
+    if "include_in_main_set" in schema:
+        tags["include_in_main_set"] = "yes" if keep else ("borderline" if borderline else "no")
+    if "exclusion_reason" in schema:
+        tags["exclusion_reason"] = "" if keep or borderline else (exclusion or "not nonheme iron lineage")
+    if "is_blacklisted" in schema:
+        tags["is_blacklisted"] = "false" if keep or borderline else "true"
+    if "blacklist_reason" in schema:
+        tags["blacklist_reason"] = "" if keep or borderline else (exclusion or "not nonheme iron lineage")
+    if "manual_review_priority" in schema:
+        tags["manual_review_priority"] = "high" if keep else ("medium" if borderline else "low")
+    if "new_to_nature_reaction" in schema:
+        tags["new_to_nature_reaction"] = "true" if any(k in text for k in ["new-to-nature", "abiological", "non-native", "non-natural", "unnatural"]) else "unclear"
+    if "confidence" in schema:
+        tags["confidence"] = "0.70" if keep else "0.60"
+    if "key_innovation" in schema:
+        tags["key_innovation"] = f"基于题名和摘要初筛: {title[:60]}..."
+    if "limitation" in schema:
+        tags["limitation"] = "需要LLM或人工复核确认non-heme iron谱系与具体反应证据。"
+    if "future_direction" in schema:
+        tags["future_direction"] = "优先核查摘要、SI和引文网络中是否存在明确non-heme iron酶工程证据。"
+    for k in schema.keys():
+        if k not in tags:
+            tags[k] = "unclear" if k in CLASSIFICATION_FIELDS else "N/A"
+    return tags
+
+
 def fallback_extract(title: str, abstract: str, schema: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """无需LLM时的增强正则fallback提取。大幅扩展关键词覆盖，减少N/A。"""
     schema = schema or EXTRACTION_SCHEMA
     text = (title + " " + abstract).lower()
     tags = {}
+    if is_nonheme_iron_schema(schema):
+        return fallback_extract_nonheme_iron(title, abstract, schema)
     
     # ========== 酶家族 ==========
     enzyme_family = _detect_enzyme_family(text)

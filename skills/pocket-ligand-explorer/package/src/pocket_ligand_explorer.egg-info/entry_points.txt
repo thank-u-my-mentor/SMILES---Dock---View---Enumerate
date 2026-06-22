@@ -1,0 +1,3 @@
+[console_scripts]
+ple = pocket_ligand_explorer.cli:main
+ple-vina = pocket_ligand_explorer.vina_cli:main

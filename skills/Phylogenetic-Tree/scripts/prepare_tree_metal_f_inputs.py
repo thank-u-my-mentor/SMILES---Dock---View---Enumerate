@@ -139,13 +139,16 @@ def write_fasta(path: Path, rows: List[Dict[str, str]]) -> None:
 
 def write_kingdom_itol(path: Path, rows: List[Dict[str, str]]) -> None:
     colors = {
-        "Bacteria": "#4E79A7",
-        "Archaea": "#B07AA1",
+        "Plant": "#A8D5BA",
+        "Animal": "#8FB8E6",
         "Fungi": "#59A14F",
-        "Plant": "#8CD17D",
-        "Animal": "#F28E2B",
+        "Bacteria": "#E8A0B0",
+        "Archaea": "#F4C2A1",
+        "Protist": "#F9E79F",
         "Virus": "#E15759",
-        "Unknown": "#BDBDBD",
+        "Metagenome": "#D5D5D5",
+        "Eukaryota": "#EDC948",
+        "Unknown": "#AAAAAA",
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:

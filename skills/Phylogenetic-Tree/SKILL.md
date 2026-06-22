@@ -18,6 +18,24 @@ General FASTA-to-tree workflow, not hydrolase-specific. Prefer this skill when t
 - Phylum/class annotation is optional and off by default; iTOL tree visualisation only requires kingdom-level grouping unless requested otherwise.
 - For homolog retrieval, prefer aligned seed FASTA or HMM profile -> EBI HMMER `hmmsearch` -> UniProt. Default strict E-value is `1e-10`; use `1e-20` for stricter runs. Cap combined FASTA near 1000 sequences before SSN/tree.
 
+## iTOL Visual Style
+
+Kingdom annotations are a stable visual convention inherited from the Metal-F project. Treat this as default behavior for every tree unless the user explicitly requests a different palette:
+
+- `Bacteria`: `#E8A0B0`
+- `Plant`: `#A8D5BA`
+- `Animal`: `#8FB8E6`
+- `Fungi`: `#59A14F`
+- `Archaea`: `#F4C2A1`
+- `Protist`: `#F9E79F`
+- `Metagenome`: `#D5D5D5`
+- `Eukaryota`: `#EDC948`
+- `Unknown`: `#AAAAAA`
+
+Default kingdom strip styling is `STRIP_WIDTH 25`, `MARGIN 5`, `BORDER_WIDTH 1`, `BORDER_COLOR #000000`. The scripts expose `--kingdom-strip-width`, `--kingdom-margin`, `--kingdom-border-width`, and `--kingdom-border-color` for small visual adjustments, but the defaults should remain Metal-F-compatible.
+
+When adding project-specific categorical strips such as EC class, enzyme subtype, or substrate class, do not reuse the kingdom visual language. Make those strips visually distinct from kingdom by default: narrower strip width, smaller margin, light or white border, and a high-contrast publication-style categorical palette. Avoid assigning adjacent warm hues to rare or conceptually similar categories, reserve neutral gray for `other`, and give compound labels such as `4.1.3.39/43` a visually distant hue from either parent category. iTOL color-strip datasets do not reliably support dashed borders, so prefer width, margin, and border contrast over unsupported dash-like options.
+
 ## Recommended Metal-F Setup
 
 Prepare seed inputs:

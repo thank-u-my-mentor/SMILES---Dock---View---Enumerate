@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Literature Dashboard</title>
+  <style>
+    :root {
+      --bg: #f7f7f4; --panel: #ffffff; --ink: #202326; --muted: #667078;
+      --line: #d9ddd8; --blue: #356a88; --green: #48735c; --amber: #9a6b2f;
+      --red: #9b4b45; --chip: #eef1ed;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--ink); }
+    header { padding: 18px 24px 14px; border-bottom: 1px solid var(--line); background: #fff; position: sticky; top: 0; z-index: 5; }
+    h1 { margin: 0 0 10px; font-size: 24px; font-weight: 700; }
+    .controls { display: grid; grid-template-columns: 1.5fr repeat(4, minmax(150px, 1fr)); gap: 10px; }
+    input, select { width: 100%; border: 1px solid var(--line); background: #fff; padding: 9px 10px; border-radius: 6px; font-size: 14px; }
+    main { display: grid; grid-template-columns: minmax(380px, 0.95fr) minmax(440px, 1.05fr); gap: 16px; padding: 16px 24px 24px; }
+    .stats { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; color: var(--muted); font-size: 13px; }
+    .stat { background: var(--chip); padding: 5px 8px; border-radius: 6px; }
+    .list { display: flex; flex-direction: column; gap: 10px; max-height: calc(100vh - 150px); overflow: auto; padding-right: 4px; }
+    .paper { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; cursor: pointer; }
+    .paper.active { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(53,106,136,.12); }
+    .title { font-weight: 700; line-height: 1.35; }
+    .meta { color: var(--muted); font-size: 12px; margin-top: 5px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .chip { background: var(--chip); border-radius: 999px; padding: 3px 7px; font-size: 12px; }
+    .chip.high { color: #fff; background: var(--green); }
+    .chip.other { color: #fff; background: var(--amber); }
+    .chip.bad { color: #fff; background: var(--red); }
+    .detail { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; min-height: 320px; padding: 16px; }
+    .detail h2 { margin: 0 0 8px; font-size: 20px; }
+    .kv { display: grid; grid-template-columns: 150px 1fr; gap: 8px 12px; font-size: 14px; margin-top: 14px; }
+    .kv div:nth-child(odd) { color: var(--muted); }
+    .abstract { margin-top: 14px; line-height: 1.55; color: #303438; white-space: pre-wrap; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 10px; }
+    button { border: 1px solid var(--line); background: #fff; border-radius: 6px; padding: 8px 10px; cursor: pointer; }
+    button.active { background: var(--blue); color: #fff; border-color: var(--blue); }
+    #network { width: 100%; height: 420px; border: 1px solid var(--line); border-radius: 8px; background: #fbfbf9; }
+    .hidden { display: none; }
+    @media (max-width: 980px) { main { grid-template-columns: 1fr; } .controls { grid-template-columns: 1fr 1fr; } .list { max-height: 520px; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Literature Dashboard</h1>
+    <div class="controls">
+      <input id="q" placeholder="搜索标题、DOI、摘要、关键词">
+      <select id="zotero"></select>
+      <select id="domain"></select>
+      <select id="family"></select>
+      <select id="reaction"></select>
+      <select id="priority"></select>
+      <select id="fieldMatch"></select>
+    </div>
+    <div class="stats" id="stats"></div>
+  </header>
+  <main>
+    <section>
+      <div class="list" id="list"></div>
+    </section>
+    <section>
+      <div class="tabs">
+        <button id="tabDetail" class="active">文献详情</button>
+        <button id="tabNetwork">引文网络</button>
+      </div>
+      <div id="detail" class="detail"></div>
+      <div id="networkPanel" class="hidden">
+        <canvas id="network"></canvas>
+        <div class="meta">圆点大小按引用数；蓝色为种子，绿色为发现文献。点击节点会尝试匹配详情。</div>
+      </div>
+    </section>
+  </main>
+<script>
+const DATA = {"papers": [{"id": "dbe1c49daf", "title": "Enantioselective Enzyme-Catalyzed Aziridination Enabled by Active-Site Evolution of a Cytochrome P450", "authors": "Farwell, Christopher C.", "year": 2015, "doi": "10.1021/acscentsci.5b00056", "journal": "ACS Central Science", "url": "https://doi.org/10.1021/acscentsci.5b00056", "abstract": "nan", "enzyme_family": "P450", "paper_domain": "enzymatic non-photo", "search_track": "N/A", "photoenzymatic_application_status": "N/A", "new_to_nature_reaction": "N/A", "flavin_cofactor": "N/A", "characterized_enzyme_evidence": "N/A", "candidate_for_photoenzyme_repurposing": "N/A", "structure_similarity_hint": "N/A", "topic_domain": "other", "reaction_type": "other", "mechanism": "unclear", "bond": "unclear", "substrate": "other", "opportunity": "medium", "hydrolase_relevance": "stereocontrol analogy", "review_priority": "medium", "zotero_status": "zotero_seed", "metadata_keywords": "unclear", "relevance_score": "", "citation_count": "", "discovery_depth": "", "criteria_status": "", "criteria_score": "", "criteria_missing": "", "field_match_status": "", "criteria_field_hits": "", "criteria_enzyme_feature_hits": "", "criteria_reaction_hits": "", "key_innovation": "基于标题推断: Enantioselective Enzyme-Catalyzed Aziridination Enabled by A...", "limitation": "需LLM进一步提取", "future_direction": "需LLM进一步提取"}, {"id": "19a54ea8bb", "title": "Catalytic, asymmetric carbon-nitrogen bond formation using metal nitrenoids: from metal-ligand complexes via metalloporphyrins to enzymes", "authors": "Sewell, Jordan P.", "year": 2023, "doi": "10.1039/D3SC04661C", "journal": "Chemical Science", "url": "https://doi.org/10.1039/D3SC04661C", "abstract": "nan", "enzyme_family": "Other_enzyme", "paper_domain": "enzymatic non-photo", "search_track": "N/A", "photoenzymatic_application_status": "N/A", "new_to_nature_reaction": "N/A", "flavin_cofactor": "N/A", "characterized_enzyme_evidence": "N/A", "candidate_for_photoenzyme_repurposing": "N/A", "structure_similarity_hint": "N/A", "topic_domain": "other", "reaction_type": "other", "mechanism": "unclear", "bond": "C-N", "substrate": "other", "opportunity": "high", "hydrolase_relevance": "stereocontrol analogy", "review_priority": "medium", "zotero_status": "zotero_seed", "metadata_keywords": "unclear", "relevance_score": "", "citation_count": "", "discovery_depth": "", "criteria_status": "", "criteria_score": "", "criteria_missing": "", "field_match_status": "", "criteria_field_hits": "", "criteria_enzyme_feature_hits": "", "criteria_reaction_hits": "", "key_innovation": "基于标题推断: Catalytic, asymmetric carbon-nitrogen bond formation using m...", "limitation": "需LLM进一步提取", "future_direction": "需LLM进一步提取"}, {"id": "4c2eb2e6ab", "title": "Nitrene transfers mediated by natural and artificial iron enzymes", "authors": "Coin, Guillaume", "year": 2021, "doi": "10.1016/j.jinorgbio.2021.111613", "journal": "Journal of Inorganic Biochemistry", "url": "https://doi.org/10.1016/j.jinorgbio.2021.111613", "abstract": "nan", "enzyme_family": "Other_enzyme", "paper_domain": "enzymatic non-photo", "search_track": "N/A", "photoenzymatic_application_status": "N/A", "new_to_nature_reaction": "N/A", "flavin_cofactor": "N/A", "characterized_enzyme_evidence": "N/A", "candidate_for_photoenzyme_repurposing": "N/A", "structure_similarity_hint": "N/A", "topic_domain": "other", "reaction_type": "other", "mechanism": "unclear", "bond": "unclear", "substrate": "other", "opportunity": "high", "hydrolase_relevance": "stereocontrol analogy", "review_priority": "medium", "zotero_status": "zotero_seed", "metadata_keywords": "unclear", "relevance_score": "", "citation_count": "", "discovery_depth": "", "criteria_status": "", "criteria_score": "", "criteria_missing": "", "field_match_status": "", "criteria_field_hits": "", "criteria_enzyme_feature_hits": "", "criteria_reaction_hits": "", "key_innovation": "基于标题推断: Nitrene transfers mediated by natural and artificial iron en...", "limitation": "需LLM进一步提取", "future_direction": "需LLM进一步提取"}, {"id": "1eb1aba006", "title": "Nitrene Transfer Catalyzed by a Non-Heme Iron Enzyme and Enhanced by Non-Native Small-Molecule Ligands", "authors": "Goldberg, Nathaniel W.", "year": 2019, "doi": "10.1021/jacs.9b11608", "journal": "Journal of the American Chemical Society", "url": "https://doi.org/10.1021/jacs.9b11608", "abstract": "nan", "enzyme_family": "Other_enzyme", "paper_domain": "enzymatic non-photo", "search_track": "N/A", "photoenzymatic_application_status": "N/A", "new_to_nature_reaction": "N/A", "flavin_cofactor": "N/A", "characterized_enzyme_evidence": "N/A", "candidate_for_photoenzyme_repurposing": "N/A", "structure_similarity_hint": "N/A", "topic_domain": "other", "reaction_type": "other", "mechanism": "unclear", "bond": "unclear", "substrate": "other", "opportunity": "high", "hydrolase_relevance": "stereocontrol analogy", "review_priority": "medium", "zotero_status": "zotero_seed", "metadata_keywords": "unclear", "relevance_score": "", "citation_count": "", "discovery_depth": "", "criteria_status": "", "criteria_score": "", "criteria_missing": "", "field_match_status": "", "criteria_field_hits": "", "criteria_enzyme_feature_hits": "", "criteria_reaction_hits": "", "key_innovation": "基于标题推断: Nitrene Transfer Catalyzed by a Non-Heme Iron Enzyme and Enh...", "limitation": "需LLM进一步提取", "future_direction": "需LLM进一步提取"}, {"id": "cbce3fd3a4", "title": "Enzyme-Controlled Nitrogen-Atom Transfer Enables Regiodivergent C-H Amination", "authors": "Hyster, Todd K.", "year": 2014, "doi": "10.1021/ja509308v", "journal": "Journal of the American Chemical Society", "url": "https://doi.org/10.1021/ja509308v", "abstract": "nan", "enzyme_family": "Other_enzyme", "paper_domain": "enzymatic non-photo", "search_track": "N/A", "photoenzymatic_application_status": "N/A", "new_to_nature_reaction": "N/A", "flavin_cofactor": "N/A", "characterized_enzyme_evidence": "N/A", "candidate_for_photoenzyme_repurposing": "N/A", "structure_similarity_hint": "N/A", "topic_domain": "other", "reaction_type": "other", "mechanism": "unclear", "bond": "C-H", "substrate": "other", "opportunity": "high", "hydrolase_relevance": "stereocontrol analogy", "review_priority": "medium", "zotero_status": "zotero_seed", "metadata_keywords": "unclear", "relevance_score": "", "citation_count": "", "discovery_depth": "", "criteria_status": "", "criteria_score": "", "criteria_missing": "", "field_match_status": "", "criteria_field_hits": "", "criteria_enzyme_feature_hits": "", "criteria_reaction_hits": "", "key_innovation": "基于标题推断: Enzyme-Controlled Nitrogen-Atom Transfer Enables Regiodiverg...", "limitation": "需LLM进一步提取", "future_direction": "需LLM进一步提取"}], "network": {"nodes": [], "edges": []}};
+let papers = DATA.papers || [];
+let filtered = papers.slice();
+let selected = null;
+const $ = id => document.getElementById(id);
+function uniq(field) {
+  return [...new Set(papers.map(p => p[field]).filter(v => v && v !== 'N/A'))].sort();
+}
+function fillSelect(id, label, field) {
+  const el = $(id);
+  el.innerHTML = `<option value="">${label}</option>` + uniq(field).map(v => `<option>${escapeHtml(v)}</option>`).join('');
+}
+function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function applyFilters() {
+  const q = $('q').value.toLowerCase().trim();
+  const zotero = $('zotero').value, domain = $('domain').value, fam = $('family').value, rxn = $('reaction').value, pri = $('priority').value, fieldMatch = $('fieldMatch').value;
+  filtered = papers.filter(p => {
+    const blob = [p.title,p.doi,p.abstract,p.metadata_keywords,p.enzyme_family,p.reaction_type,p.mechanism,p.search_track,p.flavin_cofactor,p.photoenzymatic_application_status,p.characterized_enzyme_evidence,p.structure_similarity_hint,p.criteria_status,p.field_match_status,p.criteria_field_hits,p.criteria_enzyme_feature_hits,p.criteria_reaction_hits].join(' ').toLowerCase();
+    return (!q || blob.includes(q)) && (!zotero || p.zotero_status === zotero) && (!domain || p.paper_domain === domain) && (!fam || p.enzyme_family === fam) && (!rxn || p.reaction_type === rxn) && (!pri || p.review_priority === pri) && (!fieldMatch || p.field_match_status === fieldMatch);
+  });
+  renderList();
+  renderStats();
+}
+function renderStats() {
+  const count = filtered.length;
+  const other = filtered.filter(p => p.enzyme_family === 'Other_enzyme').length;
+  const noenz = filtered.filter(p => p.enzyme_family === 'no enzyme').length;
+  const high = filtered.filter(p => p.review_priority === 'high').length;
+  const fresh = filtered.filter(p => p.zotero_status === 'new_discovery').length;
+  const cpass = filtered.filter(p => p.criteria_status === 'criteria_pass').length;
+  const cborder = filtered.filter(p => p.criteria_status === 'criteria_borderline').length;
+  $('stats').innerHTML = [`显示 ${count} / ${papers.length}`, `New ${fresh}`, `criteria pass ${cpass}`, `borderline ${cborder}`, `Other ${other}`, `no enzyme ${noenz}`, `high priority ${high}`].map(x => `<span class="stat">${x}</span>`).join('');
+}
+function chipClass(p) {
+  if (p.review_priority === 'high') return 'high';
+  if (p.enzyme_family === 'Other_enzyme') return 'other';
+  if (p.paper_domain === 'unrelated/blacklist' || p.paper_domain === 'organic synthesis no-enzyme') return 'bad';
+  return '';
+}
+function renderList() {
+  $('list').innerHTML = filtered.map((p, i) => `
+    <article class="paper ${selected && selected.id === p.id ? 'active' : ''}" onclick="selectPaper(${i})">
+      <div class="title">${escapeHtml(p.title)}</div>
+      <div class="meta">${p.year || ''} · ${escapeHtml(p.journal || '')} · ${escapeHtml(p.doi || 'no DOI')}</div>
+      <div class="chips">
+        <span class="chip ${chipClass(p)}">${escapeHtml(p.enzyme_family)}</span>
+        <span class="chip">${escapeHtml(p.zotero_status || '')}</span>
+        <span class="chip">${escapeHtml(p.paper_domain)}</span>
+        <span class="chip">${escapeHtml(p.criteria_status || '')}</span>
+        <span class="chip">${escapeHtml(p.field_match_status || '')}</span>
+        <span class="chip">${escapeHtml(p.search_track || p.flavin_cofactor || '')}</span>
+        <span class="chip">${escapeHtml(p.reaction_type)}</span>
+        <span class="chip">${escapeHtml(p.review_priority)}</span>
+      </div>
+    </article>`).join('');
+  if (!selected && filtered.length) selectPaper(0, false);
+}
+function selectPaper(i, rerender=true) {
+  selected = filtered[i];
+  if (!selected) return;
+  $('detail').innerHTML = `
+    <h2>${escapeHtml(selected.title)}</h2>
+    <div class="meta">${escapeHtml(selected.authors || '')} · ${selected.year || ''} · ${escapeHtml(selected.journal || '')}</div>
+    <div class="kv">
+      <div>DOI</div><div>${selected.doi ? `<a href="https://doi.org/${escapeHtml(selected.doi)}" target="_blank">${escapeHtml(selected.doi)}</a>` : 'missing'}</div>
+      <div>Zotero状态</div><div>${escapeHtml(selected.zotero_status || '')}</div>
+      <div>文献域</div><div>${escapeHtml(selected.paper_domain)}</div>
+      <div>Criteria</div><div>${escapeHtml(selected.criteria_status || '')} · ${escapeHtml(selected.criteria_score || '')} · field=${escapeHtml(selected.field_match_status || '')} · missing=${escapeHtml(selected.criteria_missing || '')}</div>
+      <div>Criteria命中</div><div>${escapeHtml([selected.criteria_field_hits, selected.criteria_enzyme_feature_hits, selected.criteria_reaction_hits].filter(Boolean).join(' / '))}</div>
+      <div>Flavin任务分轨</div><div>${escapeHtml(selected.search_track || '')}</div>
+      <div>Flavin辅因子</div><div>${escapeHtml(selected.flavin_cofactor || '')}</div>
+      <div>Photoenzyme状态</div><div>${escapeHtml(selected.photoenzymatic_application_status || '')} · new-to-nature=${escapeHtml(selected.new_to_nature_reaction || '')}</div>
+      <div>酶家族</div><div>${escapeHtml(selected.enzyme_family)}</div>
+      <div>反应类型</div><div>${escapeHtml(selected.reaction_type)}</div>
+      <div>机制</div><div>${escapeHtml(selected.mechanism)}</div>
+      <div>底物/成键</div><div>${escapeHtml(selected.substrate)} / ${escapeHtml(selected.bond)}</div>
+      <div>表征/候选价值</div><div>${escapeHtml(selected.characterized_enzyme_evidence || '')} · ${escapeHtml(selected.candidate_for_photoenzyme_repurposing || '')}</div>
+      <div>结构相似线索</div><div>${escapeHtml(selected.structure_similarity_hint || '')}</div>
+      <div>酶口袋机会</div><div>${escapeHtml(selected.opportunity)} · ${escapeHtml(selected.hydrolase_relevance)}</div>
+      <div>API关键词</div><div>${escapeHtml(selected.metadata_keywords)}</div>
+    </div>
+    <div class="abstract">${escapeHtml(selected.abstract || '')}</div>`;
+  if (rerender) renderList();
+}
+function setup() {
+  fillSelect('domain', '全部文献域', 'paper_domain');
+  fillSelect('zotero', '全部Zotero状态', 'zotero_status');
+  fillSelect('family', '全部酶家族', 'enzyme_family');
+  fillSelect('reaction', '全部反应', 'reaction_type');
+  fillSelect('priority', '全部优先级', 'review_priority');
+  fillSelect('fieldMatch', '全部field命中', 'field_match_status');
+  ['q','zotero','domain','family','reaction','priority','fieldMatch'].forEach(id => $(id).addEventListener('input', applyFilters));
+  $('tabDetail').onclick = () => showTab('detail');
+  $('tabNetwork').onclick = () => showTab('network');
+  applyFilters();
+}
+function showTab(tab) {
+  $('tabDetail').classList.toggle('active', tab === 'detail');
+  $('tabNetwork').classList.toggle('active', tab === 'network');
+  $('detail').classList.toggle('hidden', tab !== 'detail');
+  $('networkPanel').classList.toggle('hidden', tab !== 'network');
+  if (tab === 'network') drawNetwork();
+}
+function drawNetwork() {
+  const c = $('network'), ctx = c.getContext('2d');
+  const rect = c.getBoundingClientRect(); c.width = rect.width * devicePixelRatio; c.height = rect.height * devicePixelRatio; ctx.scale(devicePixelRatio, devicePixelRatio);
+  ctx.clearRect(0,0,rect.width,rect.height);
+  const nodes = DATA.network.nodes || [], edges = DATA.network.edges || [];
+  if (!nodes.length) { ctx.fillText('没有 citation network 数据。运行 --discover 并保留 citation_analyzer。', 20, 30); return; }
+  const pos = new Map();
+  nodes.forEach((n,i) => {
+    const angle = 2*Math.PI*i/nodes.length;
+    const r = Math.min(rect.width, rect.height)*0.38*(0.65 + 0.35*((n.depth||0)+1)/3);
+    pos.set(n.id, [rect.width/2 + Math.cos(angle)*r, rect.height/2 + Math.sin(angle)*r]);
+  });
+  ctx.strokeStyle = 'rgba(70,80,80,.18)';
+  edges.forEach(e => { const a=pos.get(e.source), b=pos.get(e.target); if(!a||!b)return; ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]); ctx.stroke(); });
+  nodes.forEach(n => { const p=pos.get(n.id); const size=Math.max(3, Math.min(14, Math.log((n.citations||0)+1)*2)); ctx.beginPath(); ctx.fillStyle=n.is_seed?'#356a88':'#48735c'; ctx.arc(p[0],p[1],size,0,Math.PI*2); ctx.fill(); });
+}
+setup();
+</script>
+</body>
+</html>

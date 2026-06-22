@@ -34,6 +34,12 @@ A docking history from `smiles-to-vina-docking`, usually containing:
 - receptor PDBQT or PDB file
 - Vina config file with `center_*` and `size_*`
 
+For arbitrary protein projects without external activity or official scores,
+`dock_history.csv` alone is enough for the basic pose report. In that case
+`infer_binding_mode_families.py --score-column auto` falls back to
+`affinity_kcal_mol` and treats lower docking affinity as better. This fallback is
+only a structural triage signal, not experimental validation.
+
 ## Workflow Position
 
 ```
@@ -76,6 +82,23 @@ python /path/to/pose-analyzer/scripts/infer_binding_mode_families.py \
   --outdir ~/vina_task2/pose_analysis
 ```
 
+For a general local project with no external score table:
+
+```bash
+python /path/to/pose-analyzer/scripts/infer_binding_mode_families.py \
+  --analysis-csv ~/vina_task2/dock_history/dock_history.csv \
+  --history-csv ~/vina_task2/dock_history/dock_history.csv \
+  --receptor ~/vina_task2/vina_bin/target.pdbqt \
+  --config ~/vina_task2/vina_bin/config.txt \
+  --outdir ~/vina_task2/pose_analysis \
+  --score-column auto
+```
+
+`--score-column auto` prefers `official_binding_score` when present, then common
+score column names, then `affinity_kcal_mol`. Use
+`--score-direction lower-is-better` for affinity-like custom columns and
+`--score-direction higher-is-better` for assay/activity-like custom columns.
+
 With iterative grid-box tuning:
 
 ```bash
@@ -115,11 +138,28 @@ Outputs:
 Add `--save-pse` to also execute the generated PyMOL scripts and save `.pse`
 sessions. Without `--save-pse`, the skill writes portable `.pml` files only.
 
+## Static HTML Pose Report
+
+After structural analysis, build a simple offline HTML report:
+
+```bash
+python /path/to/pose-analyzer/scripts/build_pose_report.py \
+  --history-csv ~/vina_task2/dock_history/dock_history.csv \
+  --pose-analysis-dir ~/vina_task2/pose_analysis \
+  --outdir ~/vina_task2/pose_report
+```
+
+Open `~/vina_task2/pose_report/index.html`. The report links to docked poses,
+logs, PyMOL `.pml` files, and optional `.pse` sessions.
+
 ## Score Space Model (Exploratory Supervised Analysis)
 
 `score_space_model.py` trains a **Random Forest Regressor** on scored historical
-molecules to explore which features correlate with the teacher signal
-(`official_binding_score`). It is **diagnostic**, not a production QSAR model.
+molecules to explore which features correlate with the selected teacher signal.
+By default this is `official_binding_score` when present; PLE can instead pass
+`--score-column affinity_kcal_mol --score-direction lower-is-better` so docking
+affinity becomes an internal diagnostic signal. It is **diagnostic**, not a
+production QSAR model.
 
 ### What model is used?
 
@@ -383,10 +423,14 @@ PyMOL is available. The fallback is residue-neighbor density and is marked as
 `surface_method=neighbor_density`. Prefer PyMOL SASA or FreeSASA/MSMS when surface
 exposure matters.
 
-The PyMOL views use `predicted_binding_surface` in lime and
-`predicted_surface_contact_4a` / contact residues in `tv_orange`. Ranked PML
-filenames include both binding-surface coverage and surface-contact fraction so
-the source pose remains traceable.
+The PyMOL views keep user `pymolrc` settings as much as possible: generated PML
+files use `delete all` instead of `reinitialize`, set residue-level mouse
+selection for easier picking, and end with `deselect`. The
+`predicted_binding_surface` object is shown as one uniform green surface; waters,
+metals, and other non-polymer contacts are shown as spheres so clicking them
+remains object-level rather than visually buried in residue stick styling. Ranked
+PML filenames include both binding-surface coverage and surface-contact fraction
+so the source pose remains traceable.
 
 ## Future ML Direction
 

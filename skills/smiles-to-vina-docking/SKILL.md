@@ -11,6 +11,12 @@ Use this skill when the user wants a practical SMILES -> Vina -> history workflo
 
 The current design is intentionally split into small tools:
 
+- `scripts/run_project.py`: easiest local entry point. Given one receptor, one
+  Vina-style config, and one starting SMILES, it runs environment checks, docks
+  the input and optional analogs, calls `pose-analyzer`, and writes a static HTML
+  pose report.
+- `scripts/check_local_env.py`: verify that the active conda/Python environment
+  has RDKit, Meeko, a docking executable, and optional PyMOL/OpenBabel support.
 - `scripts/dock_smiles.py`: daily-use command. Dock one input SMILES, optionally generate analogs, and append results to `dock_history.csv`.
 - `scripts/sync_binding_scores.py`: merge a local Task2 scoring xlsx into `dock_history.csv` and analyze score-vs-docking correlations.
 - `scripts/rank_history.py`: compare all historical molecules against one reference SMILES and write `ranked_history.csv`.
@@ -22,6 +28,12 @@ Avoid odd project names. User-facing files should use simple English that is eas
 ## Mental Model
 
 Think of the history directory as a persistent docking ledger, not as a temporary run folder. Keep using the same `--history-dir` over time. Do not create timestamped history folders unless the user explicitly asks for that.
+
+History writes must be live and durable. `dock_smiles.py` appends each completed
+molecule to `dock_history.csv`, flushes/fsyncs it, and only then prints the
+`[dock] ... affinity=...` line. If a long run is terminated, every already
+printed `[dock]` row should be readable from the CSV; only the molecule currently
+inside ligand preparation/docking may be absent or incomplete.
 
 The history directory contains:
 
@@ -58,7 +70,15 @@ different project.
 
 There is no permanent global lead in the docking history. The ledger records ancestry directly with SMILES strings, not with a pile of separate ids.
 
-SMILES strings are not unique. Always preserve the user's `input_smiles` exactly as typed, plus `nickname`. Use canonical SMILES for chemical duplicate detection, and treat exact `input_smiles` only as a retrieval alias or provenance field. Do not rely on tautomer or InChIKey columns for this workflow.
+Keep the public history table simple: write one ligand identity column named
+`smiles`. Internally, helper code may still read old histories containing
+`input_smiles` and `canonical_smiles`, but new `dock_history.csv` files should
+not keep both columns. Use canonical SMILES for duplicate detection.
+
+For GNINA/GLINA runs, `cnn_pose_score` records the best mode's `REMARK CNNscore`
+from the output PDBQT/log. This replaces the old public `whole_rmsd` column in
+new compact histories. Keep `inner_rmsd` as the local multi-pose consistency
+metric; use `cnn_pose_score` as the pose plausibility signal.
 
 ## Requirements
 
@@ -81,6 +101,85 @@ python -c "import rdkit; print('rdkit ok')"
 python -m meeko.cli.mk_prepare_ligand --help
 which obabel
 ```
+
+Recommended local conda checks on Windows/Linux/macOS:
+
+```bash
+conda activate md
+python scripts/check_local_env.py --docking-engine vina --strict
+
+conda activate glina
+python scripts/check_local_env.py --docking-engine gnina --strict
+```
+
+The `glina` environment name is user-specific. If the executable is actually
+called `glina`, use `--docking-engine glina` and `run_project.py --engine glina`.
+If it is called `gnina`, use `--engine gnina`.
+
+## One-Command Local Project
+
+For a general arbitrary protein and one starting ligand, prefer:
+
+```bash
+python /path/to/smiles-to-vina-docking/scripts/run_project.py \
+  --smiles "<STARTING_SMILES>" \
+  --receptor /path/to/receptor.pdbqt \
+  --config /path/to/vina_config.txt \
+  --analogs
+```
+
+This writes:
+
+- `~/vina_task2/dock_history/dock_history.csv`
+- `~/vina_task2/dock_history/poses/`
+- `~/vina_task2/pose_analysis/`
+- `~/vina_task2/pose_report/index.html`
+
+Defaults are deliberately conservative: no analogs unless `--analogs` is passed,
+one analog round when `--analogs` is used, `--batch-size 24`, `--exhaustiveness 8`,
+and `--num-modes 9`.
+
+`run_project.py` runs `check_local_env.py --strict` before docking unless
+`--skip-env-check` is supplied.
+
+Use Vina explicitly:
+
+```bash
+python /path/to/smiles-to-vina-docking/scripts/run_project.py \
+  --smiles "<STARTING_SMILES>" \
+  --receptor /path/to/receptor.pdbqt \
+  --config /path/to/vina_config.txt \
+  --engine vina \
+  --analogs
+```
+
+Use a GNINA/GLINA-style executable if it accepts Vina-compatible CLI flags:
+
+```bash
+python /path/to/smiles-to-vina-docking/scripts/run_project.py \
+  --smiles "<STARTING_SMILES>" \
+  --receptor /path/to/receptor.pdbqt \
+  --config /path/to/vina_config.txt \
+  --engine gnina \
+  --analogs
+```
+
+Extra GNINA/Vina-compatible options can be passed through with repeated
+`--engine-arg` tokens. Use the `--engine-arg=value` form for options that begin
+with `--`:
+
+```bash
+python /path/to/smiles-to-vina-docking/scripts/dock_smiles.py \
+  --smiles "<SMILES>" \
+  --history-dir ~/vina_task2/dock_history \
+  --vina gnina \
+  --engine-arg=--cnn_scoring \
+  --engine-arg=refinement
+```
+
+Add `--save-pse` only when PyMOL is installed and you want automatic `.pse`
+session files. The workflow always writes `.pml` view scripts when pose analysis
+succeeds.
 
 ## Daily Docking
 First run needs the paths:
@@ -154,12 +253,26 @@ Analog edit controls:
 - `--add`: only add small substituents.
 - `--delete`: only remove substituents.
 - `--shrink`: delete or replace bulky substituents with smaller groups.
-- `--drastic`: include broader edits such as aromatic C-to-N swaps and larger scaffold moves.
-- `--edit-mode shrink,delete`: explicit comma-separated selection.
+- `--replace`: only apply conservative replacement/bioisostere edits.
+- `--drastic`: include broader edits such as aromatic C-to-N swaps, replacement
+  edits, and scaffold contraction-style moves.
+- `--edit-mode shrink,delete,replace`: explicit comma-separated selection.
+
+The default batch is deliberately interleaved by edit family, so a molecule with
+valid replacements should not produce a long add-only run. Replacement edits
+include amide/linker swaps, methoxy/hydroxy/fluoro simplifications, aromatic
+C-to-N walks, and phenyl-to-five-member heteroaryl replacements when the parent
+structure allows them. Some starting SMILES legitimately have no removable
+substituent or shrinkable branch; in that case delete/shrink may contribute no
+candidates, but replace/add/drastic should still be mixed.
 
 Batch order is randomized by default for exploration. Use `--deterministic-batch` only for debugging.
 
-Generated analogs pass a lightweight property gate before docking. This prevents multi-round analog generation from spending time on molecules that are already far outside a practical drug-like space. The gate applies only to generated analogs, not to the manually supplied input SMILES.
+Generated analogs pass a lightweight property gate before docking. This prevents
+multi-round analog generation from spending time on molecules that are already
+far outside a practical chemical space. The gate applies only to generated
+analogs, not to the manually supplied input SMILES, and these gate values are not
+written into `dock_history.csv`.
 
 Default analog property gate:
 
@@ -168,7 +281,8 @@ Default analog property gate:
 - `--max-analog-rot-bonds 14`
 - `--max-analog-tpsa 180`
 
-For drug-likeness rescue work, tighten these values, for example `--min-analog-qed 0.40 --max-analog-mw 550 --max-analog-rot-bonds 10 --max-analog-tpsa 140`.
+For stricter analog exploration, tighten these values, for example
+`--min-analog-qed 0.40 --max-analog-mw 550 --max-analog-rot-bonds 10 --max-analog-tpsa 140`.
 
 ## History Columns
 
@@ -176,30 +290,22 @@ For drug-likeness rescue work, tighten these values, for example `--min-analog-q
 
 Recommended columns in the current minimal ledger:
 
-`dock_history.csv` may also contain two optional `druglike-pocket-refiner` columns:
-`refinement_source` and `druglike_refinement_score`. Keep detailed refiner component
-scores in `druglike_refinement_ranked.csv`, not in the persistent docking history.
-
 - `seq_id`: simple sequence id such as `S000001`.
 - `timestamp`: when the row was created.
 - `nickname`: user-facing label, preserved if the user edits it.
 - `ancestor_smiles`: the original ancestor for the family.
 - `parent_smiles`: the direct parent used to generate this row, empty for the first input row.
 - `edit_label`: the transformation label for generated rows, or `input_smiles` for the first dock.
-- `input_smiles`: exactly what the user or generator supplied.
-- `smiles`, `canonical_smiles`: the normalized molecule string used by the code.
+- `smiles`: the normalized molecule string used by the code. Old
+  `input_smiles`/`canonical_smiles` columns are read for compatibility only.
 
 Important docking and chemistry columns:
 
 - `affinity_kcal_mol`
-- `official_binding_score`, `binding_score_source`
-- `mode_count`
-- `best_affinity_mode`
 - `inner_rmsd`: average RMSD of retained modes against the best-affinity mode.
 - `inner_cluster_fraction`: fraction of modes within `--internal-cluster-rmsd-cutoff` of the best-affinity mode.
-- `whole_rmsd`: mean pairwise RMSD across retained modes.
+- `cnn_pose_score`: GNINA/GLINA CNN pose score when available.
 - `hbond_count`, `hydrophobic_count`, `vdw_contact_count`, `pi_contact_count`, `ch_pi_count`
-- `mw`, `logp`, `hbd`, `hba`, `tpsa`, `rot_bonds`, `heavy_atoms`, `formal_charge`
 - `pose_path`, `log_path`, `sdf_path`, `pdbqt_path`, `prep_log_path`
 - `reason`
 
@@ -292,7 +398,9 @@ Start with small, interpretable edits:
 
 - Aromatic C-H substitution: F, Cl, Br, Me, OH, NH2, CN, CHO, OMe.
 - Substituent deletion and shrinkage: remove or reduce bulky non-ring branches.
-- Conservative heteroatom walks: aromatic C-to-N swaps.
+- Conservative heteroatom walks and replacements: aromatic C-to-N swaps,
+  amide/linker bioisosteres, methoxy simplification, and phenyl-to-furyl,
+  thienyl, oxazolyl, or thiazolyl replacements where chemically valid.
 - Drastic edits only after small edits are not enough.
 
 Use docking results as error exclusion and prioritization, not experimental truth. Common reasons a "scientifically reasonable" polar addition fails in Vina:

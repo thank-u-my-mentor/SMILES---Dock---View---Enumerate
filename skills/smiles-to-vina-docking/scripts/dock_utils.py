@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 from rdkit import Chem, RDLogger
-from rdkit.Chem import AllChem, Crippen, Descriptors, Lipinski, QED, rdMolDescriptors
+from rdkit.Chem import AllChem, Descriptors, Lipinski, QED, rdChemReactions, rdMolDescriptors
 
 try:
     from rdkit.Chem.MolStandardize import rdMolStandardize
@@ -42,6 +42,7 @@ DEFAULT_TASK_ROOT = Path("~/vina_task2")
 DEFAULT_LEDGER_DIR = DEFAULT_TASK_ROOT / "dock_history"
 AFFINITY_RE = re.compile(r"^\s*1\s+(-?\d+(?:\.\d+)?)\s+", re.MULTILINE)
 PDBQT_AFFINITY_RE = re.compile(r"REMARK VINA RESULT:\s+(-?\d+(?:\.\d+)?)")
+CNN_POSE_RE = re.compile(r"REMARK\s+CNNscore\s+(-?\d+(?:\.\d+)?)", re.IGNORECASE)
 HBOND_ELEMENTS = {"N", "O", "S"}
 HYDROPHOBIC_ELEMENTS = {"C", "Cl", "Br", "I", "F"}
 AROMATIC_RESIDUES = {"PHE", "TYR", "TRP", "HIS"}
@@ -50,38 +51,25 @@ LEDGER_FIELDS = [
     "seq_id",
     "timestamp",
     "nickname",
+    "ancestor_smiles",
     "parent_smiles",
-    "druglike_refinement_score",
-    "input_smiles",
-    "canonical_smiles",
+    "edit_label",
+    "smiles",
     "affinity_kcal_mol",
-    "official_binding_score",
     "inner_rmsd",
     "inner_cluster_fraction",
-    "whole_rmsd",
+    "cnn_pose_score",
     "hbond_count",
     "hydrophobic_count",
     "vdw_contact_count",
     "pi_contact_count",
     "ch_pi_count",
-    "mw",
-    "logp",
-    "hbd",
-    "hba",
-    "tpsa",
-    "rot_bonds",
-    "heavy_atoms",
-    "formal_charge",
     "sdf_path",
     "pdbqt_path",
     "pose_path",
     "log_path",
     "prep_log_path",
     "reason",
-]
-
-REFINEMENT_LEDGER_FIELDS = [
-    "druglike_refinement_score",
 ]
 
 
@@ -103,6 +91,7 @@ class VinaBox:
 class PoseMode:
     mode_index: int
     affinity: float | None
+    cnn_pose_score: float | None
     coords: list[tuple[float, float, float]]
     atoms: list[dict[str, str | float]]
 
@@ -163,8 +152,44 @@ def smiles_identity(smiles: str | None, input_smiles: str | None = None) -> dict
     }
 
 
+def row_smiles(row: dict[str, object]) -> str:
+    """Return the public SMILES value, accepting old two-column histories."""
+    return clean_smiles(
+        row.get("smiles")
+        or row.get("canonical_smiles")
+        or row.get("input_smiles")
+        or row.get("mol_smiles")
+        or ""
+    )
+
+
+def normalize_history_row(row: dict[str, object]) -> dict[str, object]:
+    out = dict(row)
+    smiles = row_smiles(out)
+    if smiles:
+        out["smiles"] = smiles
+        # Compatibility-only aliases. They are not written to compact histories.
+        if not out.get("canonical_smiles"):
+            out["canonical_smiles"] = smiles
+        if not out.get("input_smiles"):
+            out["input_smiles"] = smiles
+    if not out.get("cnn_pose_score") and out.get("whole_rmsd") not in ("", None):
+        # Old histories used whole_rmsd here. Keep it readable but do not copy it
+        # into the new public field unless it is actually a CNN pose score.
+        out.setdefault("legacy_whole_rmsd", out.get("whole_rmsd", ""))
+    return out
+
+
+def molecule_key(row: dict[str, object]) -> str:
+    smiles = row_smiles(row)
+    if not smiles:
+        return ""
+    return canonical(smiles) or smiles
+
+
 def same_molecule(a: dict[str, str], b: dict[str, str]) -> bool:
-    return bool(a.get("canonical_smiles")) and a.get("canonical_smiles") == b.get("canonical_smiles")
+    key = molecule_key(a)
+    return bool(key) and key == molecule_key(b)
 
 
 def properties(smiles: str) -> dict[str, float | int]:
@@ -174,13 +199,8 @@ def properties(smiles: str) -> dict[str, float | int]:
     return {
         "qed": round(float(QED.qed(mol)), 4),
         "mw": round(float(Descriptors.MolWt(mol)), 3),
-        "logp": round(float(Crippen.MolLogP(mol)), 3),
-        "hbd": int(Lipinski.NumHDonors(mol)),
-        "hba": int(Lipinski.NumHAcceptors(mol)),
         "tpsa": round(float(rdMolDescriptors.CalcTPSA(mol)), 3),
         "rot_bonds": int(Lipinski.NumRotatableBonds(mol)),
-        "heavy_atoms": int(mol.GetNumHeavyAtoms()),
-        "formal_charge": int(sum(atom.GetFormalCharge() for atom in mol.GetAtoms())),
     }
 
 
@@ -206,11 +226,17 @@ def read_csv(path: Path) -> list[dict[str, str]]:
     for encoding in ("utf-8-sig", "utf-8", "gb18030", "cp936", "latin1"):
         try:
             text = raw.decode(encoding)
-            return list(csv.DictReader(io.StringIO(text)))
+            return [
+                {str(key): str(value or "") for key, value in normalize_history_row(row).items()}
+                for row in csv.DictReader(io.StringIO(text))
+            ]
         except UnicodeDecodeError:
             continue
     text = raw.decode("utf-8", errors="replace")
-    return list(csv.DictReader(io.StringIO(text)))
+    return [
+        {str(key): str(value or "") for key, value in normalize_history_row(row).items()}
+        for row in csv.DictReader(io.StringIO(text))
+    ]
 
 
 def clean_float(value: object, default: float = 0.0) -> float:
@@ -227,47 +253,43 @@ def append_csv(path: Path, rows: list[dict[str, str | int | float]]) -> None:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not path.exists() or path.stat().st_size == 0
+    if not write_header:
+        with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+            current_header = next(csv.reader(handle), [])
+        if current_header != LEDGER_FIELDS:
+            existing_rows = read_csv(path)
+            write_csv(path, existing_rows)
     with path.open("a", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=LEDGER_FIELDS)
         if write_header:
             writer.writeheader()
         for row in rows:
-            writer.writerow({field: row.get(field, "") for field in LEDGER_FIELDS})
+            normalized = normalize_history_row(row)
+            writer.writerow({field: normalized.get(field, "") for field in LEDGER_FIELDS})
+            handle.flush()
+            os.fsync(handle.fileno())
 
 
 def write_csv(path: Path, rows: list[dict[str, str | int | float]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=LEDGER_FIELDS)
         writer.writeheader()
         for row in rows:
-            writer.writerow({field: row.get(field, "") for field in LEDGER_FIELDS})
-
-
-def refinement_meta_from_args(args: argparse.Namespace) -> dict[str, str]:
-    meta: dict[str, str] = {}
-    for field in REFINEMENT_LEDGER_FIELDS:
-        value = getattr(args, field, "")
-        if value not in ("", None):
-            meta[field] = str(value)
-    return meta
-
-
-def merge_refinement_meta(row: dict[str, str | int | float], meta: dict[str, str]) -> None:
-    if not meta:
-        return
-    current_score = clean_float(row.get("druglike_refinement_score"), default=float("-inf"))
-    incoming_score = clean_float(meta.get("druglike_refinement_score"), default=float("-inf"))
-    should_replace_scores = incoming_score >= current_score
-    for field, value in meta.items():
-        if value in ("", None):
-            continue
-        if field == "refinement_source":
-            existing = str(row.get(field, ""))
-            row[field] = value if not existing else existing
-            continue
-        if should_replace_scores or row.get(field, "") in ("", None):
-            row[field] = value
+            normalized = normalize_history_row(row)
+            writer.writerow({field: normalized.get(field, "") for field in LEDGER_FIELDS})
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp_path, path)
+    try:
+        directory_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        pass
 
 
 def ledger_path(ledger_dir: Path) -> Path:
@@ -341,6 +363,7 @@ def save_config(ledger_dir: Path, args: argparse.Namespace) -> None:
         "exhaustiveness": args.exhaustiveness,
         "num_modes": args.num_modes,
         "energy_range": args.energy_range,
+        "engine_args": getattr(args, "engine_args", None),
     }
     existing = load_saved_config(ledger_dir)
     existing.update({key: value for key, value in fields.items() if value not in ("", None)})
@@ -457,7 +480,16 @@ def prepare_pdbqt(sdf_path: Path, pdbqt_path: Path, meeko: str, obabel: str) -> 
     return False, "\n\n".join(outputs)
 
 
-def dock(vina: str, receptor: Path, ligand: Path, pose_path: Path, log_path: Path, box: VinaBox, seed: int) -> tuple[bool, float | None, str]:
+def dock(
+    vina: str,
+    receptor: Path,
+    ligand: Path,
+    pose_path: Path,
+    log_path: Path,
+    box: VinaBox,
+    seed: int,
+    engine_args: list[str] | None = None,
+) -> tuple[bool, float | None, str]:
     cmd = [
         vina,
         "--receptor",
@@ -491,6 +523,8 @@ def dock(vina: str, receptor: Path, ligand: Path, pose_path: Path, log_path: Pat
     ]
     if box.energy_range is not None:
         cmd.extend(["--energy_range", str(box.energy_range)])
+    if engine_args:
+        cmd.extend(engine_args)
     code, output = run(cmd)
     if not log_path.exists():
         log_path.write_text(output, encoding="utf-8", errors="replace")
@@ -536,15 +570,17 @@ def parse_pdbqt_modes(path: Path) -> list[PoseMode]:
         return modes
     current_atoms: list[dict[str, str | float]] = []
     current_affinity: float | None = None
+    current_cnn_pose_score: float | None = None
     current_index = 1
     saw_model = False
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         if line.startswith("MODEL"):
             saw_model = True
             if current_atoms:
-                modes.append(PoseMode(current_index, current_affinity, [(float(a["x"]), float(a["y"]), float(a["z"])) for a in current_atoms], current_atoms))
+                modes.append(PoseMode(current_index, current_affinity, current_cnn_pose_score, [(float(a["x"]), float(a["y"]), float(a["z"])) for a in current_atoms], current_atoms))
                 current_atoms = []
                 current_affinity = None
+                current_cnn_pose_score = None
             try:
                 current_index = int(line.split()[1])
             except Exception:
@@ -553,16 +589,21 @@ def parse_pdbqt_modes(path: Path) -> list[PoseMode]:
             match = PDBQT_AFFINITY_RE.search(line)
             if match:
                 current_affinity = float(match.group(1))
+        elif line.upper().startswith("REMARK CNNSCORE"):
+            match = CNN_POSE_RE.search(line)
+            if match:
+                current_cnn_pose_score = float(match.group(1))
         elif line.startswith(("ATOM", "HETATM")):
             atom = parse_atom_line(line)
             if atom and str(atom.get("element")) != "H":
                 current_atoms.append(atom)
         elif line.startswith("ENDMDL") and current_atoms:
-            modes.append(PoseMode(current_index, current_affinity, [(float(a["x"]), float(a["y"]), float(a["z"])) for a in current_atoms], current_atoms))
+            modes.append(PoseMode(current_index, current_affinity, current_cnn_pose_score, [(float(a["x"]), float(a["y"]), float(a["z"])) for a in current_atoms], current_atoms))
             current_atoms = []
             current_affinity = None
+            current_cnn_pose_score = None
     if current_atoms:
-        modes.append(PoseMode(current_index if saw_model else 1, current_affinity, [(float(a["x"]), float(a["y"]), float(a["z"])) for a in current_atoms], current_atoms))
+        modes.append(PoseMode(current_index if saw_model else 1, current_affinity, current_cnn_pose_score, [(float(a["x"]), float(a["y"]), float(a["z"])) for a in current_atoms], current_atoms))
     return modes
 
 
@@ -641,7 +682,7 @@ def pose_metrics(pose_path: Path, receptor_atoms: list[dict[str, str | float]], 
         "best_affinity_mode": best.mode_index,
         "inner_rmsd": round(sum(finite) / len(finite), 4) if finite else "",
         "inner_cluster_fraction": round(len(near) / len(modes), 4) if modes else "",
-        "whole_rmsd": round(sum(pairwise) / len(pairwise), 4) if pairwise else (0.0 if len(modes) == 1 else ""),
+        "cnn_pose_score": round(best.cnn_pose_score, 6) if best.cnn_pose_score is not None else "",
         **interaction_counts(best.atoms, receptor_atoms),
     }
 
@@ -781,36 +822,178 @@ def n_swaps(smiles: str) -> list[tuple[str, str]]:
     return out
 
 
-def enumerate_edits(smiles: str, modes: tuple[str, ...]) -> list[tuple[str, str]]:
+REPLACE_REACTION_SMARTS: list[tuple[str, str]] = [
+    ("amide_to_ketone", "[C:1](=[O:2])[N:3]>>[C:1](=[O:2])[C:3]"),
+    ("amide_to_amine_linker", "[C:1](=[O:2])[N:3]>>[C:1][N:3]"),
+    ("amide_to_ether_linker", "[C:1](=[O:2])[N:3]>>[C:1][O:3]"),
+    ("methoxy_to_fluoro", "[c:1][O:2][CH3:3]>>[c:1][F:2]"),
+    ("methoxy_to_hydroxy", "[c:1][O:2][CH3:3]>>[c:1][O:2]"),
+    ("ethyl_to_methyl", "[c:1][CH2:2][CH3:3]>>[c:1][CH3:2]"),
+    ("propyl_alcohol_to_methoxy", "[c:1][CH2:2][CH2:3][CH2:4][O:5]>>[c:1][O:2][CH3:3]"),
+    ("propyl_alcohol_to_hydroxy", "[c:1][CH2:2][CH2:3][CH2:4][O:5]>>[c:1][O:2]"),
+    ("phenyl_CH_to_pyridyl_N", "[cH:1]1[c:2][c:3][c:4][c:5][c:6]1>>[n:1]1[c:2][c:3][c:4][c:5][c:6]1"),
+    ("phenyl_diCH_to_pyrimidyl_diN", "[cH:1]1[c:2][cH:3][c:4][c:5][c:6]1>>[n:1]1[c:2][n:3][c:4][c:5][c:6]1"),
+]
+
+
+def reaction_replacements(smiles: str, max_products: int = 80) -> list[tuple[str, str]]:
+    reactant = mol_from_smiles(smiles)
+    if reactant is None:
+        return []
     out: list[tuple[str, str]] = []
-    if "add" in modes:
-        out.extend(aromatic_additions(smiles))
-    if "delete" in modes:
-        out.extend(deletions_and_shrinks(smiles, shrink=False))
-    if "shrink" in modes:
-        out.extend(deletions_and_shrinks(smiles, shrink=True))
-    if "drastic" in modes:
-        out.extend(n_swaps(smiles))
-        out.extend(deletions_and_shrinks(smiles, shrink=True))
-        out.extend(aromatic_additions(smiles))
+    seen: set[str] = set()
+    parent = canonical(smiles)
+    for label, smarts in REPLACE_REACTION_SMARTS:
+        try:
+            reaction = rdChemReactions.ReactionFromSmarts(smarts)
+            product_sets = reaction.RunReactants((reactant,))
+        except Exception:
+            continue
+        for products in product_sets:
+            if not products:
+                continue
+            product = sanitize_product(products[0])
+            if not product or product == parent or product in seen or "." in product:
+                continue
+            seen.add(product)
+            out.append((product, f"replace_{label}"))
+            if len(out) >= max_products:
+                return out
+    return out
+
+
+FIVE_MEMBER_HETEROARYL_TEMPLATES: list[tuple[str, tuple[str, ...], int]] = [
+    ("phenyl_to_furyl", ("O", "C", "C", "C", "C"), 1),
+    ("phenyl_to_thienyl", ("S", "C", "C", "C", "C"), 1),
+    ("phenyl_to_oxazolyl", ("O", "C", "N", "C", "C"), 1),
+    ("phenyl_to_thiazolyl", ("S", "C", "N", "C", "C"), 1),
+]
+
+
+def five_member_heteroaryl_replacements(smiles: str, max_products: int = 40) -> list[tuple[str, str]]:
+    base = mol_from_smiles(smiles)
+    if base is None:
+        return []
+    out: list[tuple[str, str]] = []
+    parent = canonical(smiles)
+    ring_info = base.GetRingInfo()
+    for ring in ring_info.AtomRings():
+        if len(ring) != 6:
+            continue
+        ring_set = set(ring)
+        if not all(base.GetAtomWithIdx(idx).GetIsAromatic() and base.GetAtomWithIdx(idx).GetAtomicNum() == 6 for idx in ring):
+            continue
+        external: list[tuple[int, int, Chem.BondType]] = []
+        for idx in ring:
+            atom = base.GetAtomWithIdx(idx)
+            for nbr in atom.GetNeighbors():
+                nbr_idx = nbr.GetIdx()
+                if nbr_idx in ring_set:
+                    continue
+                bond = base.GetBondBetweenAtoms(idx, nbr_idx)
+                if bond is not None:
+                    external.append((idx, nbr_idx, bond.GetBondType()))
+        if len(external) != 1:
+            continue
+        attached_ring_idx, external_idx, external_bond_type = external[0]
+        ordered = list(ring)
+        attach_pos = ordered.index(attached_ring_idx)
+        for drop_offset in (2, 3, 4):
+            drop_pos = (attach_pos + drop_offset) % 6
+            drop_idx = ordered[drop_pos]
+            if base.GetAtomWithIdx(drop_idx).GetTotalNumHs() < 1:
+                continue
+            for label, atom_symbols, template_attach_pos in FIVE_MEMBER_HETEROARYL_TEMPLATES:
+                rw = Chem.RWMol(base)
+                new_indices: list[int] = []
+                for symbol in atom_symbols:
+                    atom = Chem.Atom(symbol)
+                    atom.SetIsAromatic(True)
+                    new_indices.append(rw.AddAtom(atom))
+                for i in range(5):
+                    rw.AddBond(new_indices[i], new_indices[(i + 1) % 5], Chem.BondType.AROMATIC)
+                attach_template_pos = template_attach_pos if atom_symbols[template_attach_pos] == "C" else 1
+                try:
+                    rw.AddBond(external_idx, new_indices[attach_template_pos], external_bond_type)
+                    for old_idx in sorted(ring_set, reverse=True):
+                        rw.RemoveAtom(old_idx)
+                    product = sanitize_product(rw.GetMol())
+                except Exception:
+                    continue
+                if product and product != parent and "." not in product:
+                    out.append((product, f"replace_{label}"))
+                    if len(out) >= max_products:
+                        return out
     dedup: dict[str, str] = {}
     for product, label in out:
+        dedup.setdefault(product, label)
+    return [(product, label) for product, label in dedup.items()]
+
+
+def replacement_edits(smiles: str) -> list[tuple[str, str]]:
+    return [*reaction_replacements(smiles), *five_member_heteroaryl_replacements(smiles)]
+
+
+def edit_family(label: str) -> str:
+    if label.startswith("add_"):
+        return "add"
+    if label.startswith("delete_"):
+        return "delete"
+    if label.startswith("shrink_"):
+        return "shrink"
+    if label.startswith("replace_"):
+        return "replace"
+    if label.startswith("drastic_"):
+        return "drastic"
+    return "other"
+
+
+def interleave_edit_families(edits: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    buckets: dict[str, list[tuple[str, str]]] = {}
+    for product, label in edits:
+        buckets.setdefault(edit_family(label), []).append((product, label))
+    order = ("replace", "shrink", "delete", "drastic", "add", "other")
+    out: list[tuple[str, str]] = []
+    while any(buckets.get(family) for family in order):
+        for family in order:
+            bucket = buckets.get(family)
+            if bucket:
+                out.append(bucket.pop(0))
+    return out
+
+
+def enumerate_edits(smiles: str, modes: tuple[str, ...]) -> list[tuple[str, str]]:
+    grouped: list[tuple[str, str]] = []
+    if "add" in modes:
+        grouped.extend(aromatic_additions(smiles))
+    if "delete" in modes:
+        grouped.extend(deletions_and_shrinks(smiles, shrink=False))
+    if "shrink" in modes:
+        grouped.extend(deletions_and_shrinks(smiles, shrink=True))
+    if "replace" in modes:
+        grouped.extend(replacement_edits(smiles))
+    if "drastic" in modes:
+        grouped.extend(n_swaps(smiles))
+        grouped.extend(replacement_edits(smiles))
+        grouped.extend(deletions_and_shrinks(smiles, shrink=True))
+    dedup: dict[str, str] = {}
+    for product, label in grouped:
         can = canonical(product)
         if can and can != canonical(smiles):
             dedup.setdefault(can, label)
-    return [(product, label) for product, label in dedup.items()]
+    return interleave_edit_families([(product, label) for product, label in dedup.items()])
 
 
 def parse_edit_modes(text: str) -> tuple[str, ...]:
     if text in ("", "default", "all"):
-        return ("add", "delete", "shrink", "drastic")
+        return ("add", "delete", "shrink", "replace", "drastic")
     modes: list[str] = []
-    aliases = {"del": "delete", "remove": "delete", "small": "shrink", "shirnk": "shrink"}
+    aliases = {"del": "delete", "remove": "delete", "small": "shrink", "shirnk": "shrink", "contract": "replace", "bioisostere": "replace"}
     for raw in re.split(r"[,; ]+", text):
         if not raw:
             continue
         mode = aliases.get(raw.lower(), raw.lower())
-        if mode not in {"add", "delete", "shrink", "drastic"}:
+        if mode not in {"add", "delete", "shrink", "replace", "drastic"}:
             raise ValueError(f"unknown edit mode: {raw}")
         if mode not in modes:
             modes.append(mode)
@@ -819,7 +1002,7 @@ def parse_edit_modes(text: str) -> tuple[str, ...]:
 
 def selected_edit_mode(args: argparse.Namespace) -> str:
     modes = []
-    for flag, mode in (("add_only", "add"), ("delete_only", "delete"), ("shrink_only", "shrink"), ("drastic_only", "drastic")):
+    for flag, mode in (("add_only", "add"), ("delete_only", "delete"), ("shrink_only", "shrink"), ("replace_only", "replace"), ("drastic_only", "drastic")):
         if getattr(args, flag, False):
             modes.append(mode)
     return ",".join(modes) if modes else args.edit_mode
@@ -827,7 +1010,8 @@ def selected_edit_mode(args: argparse.Namespace) -> str:
 
 def row_identity(row: dict[str, str]) -> dict[str, str]:
     return {
-        "canonical_smiles": row.get("canonical_smiles", ""),
+        "smiles": row_smiles(row),
+        "canonical_smiles": row.get("canonical_smiles", "") or row_smiles(row),
     }
 
 
@@ -878,6 +1062,7 @@ def dock_one(
     vina: str,
     meeko: str,
     obabel: str,
+    engine_args: list[str],
     seed: int,
     cluster_cutoff: float,
 ) -> dict[str, str | int | float]:
@@ -910,7 +1095,16 @@ def dock_one(
         if not prep_ok:
             reason = "pdbqt_preparation_failed"
         else:
-            dock_ok, dock_affinity, dock_output = dock(vina, receptor, pdbqt_path, pose_path, log_path, box, seed)
+            dock_ok, dock_affinity, dock_output = dock(
+                vina,
+                receptor,
+                pdbqt_path,
+                pose_path,
+                log_path,
+                box,
+                seed,
+                engine_args=engine_args,
+            )
             if dock_ok and dock_affinity is not None:
                 affinity = dock_affinity
             else:
@@ -950,6 +1144,13 @@ def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
     vina = resolve_executable(str(arg_or_config(args, "vina", "vina")), ledger_dir, "vina")
     meeko = resolve_executable(str(arg_or_config(args, "meeko", "mk_prepare_ligand.py")), ledger_dir, "mk_prepare_ligand.py")
     obabel = resolve_executable(str(arg_or_config(args, "obabel", "obabel")), ledger_dir, "obabel")
+    raw_engine_args = getattr(args, "engine_args", None)
+    if raw_engine_args in (None, []):
+        raw_engine_args = arg_or_config(args, "engine_args", [])
+    if isinstance(raw_engine_args, str):
+        engine_args = [raw_engine_args]
+    else:
+        engine_args = list(raw_engine_args or [])
     box = parse_vina_config(config, args)
     print(f"vina_cpu={box.cpu} exhaustiveness={box.exhaustiveness} num_modes={box.num_modes}", flush=True)
     receptor_atoms = parse_receptor_atoms(receptor)
@@ -964,10 +1165,17 @@ def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
     input_ancestor_smiles = clean_smiles(getattr(args, "ancestor_smiles", ""))
     input_parent_smiles = clean_smiles(getattr(args, "parent_smiles", ""))
     input_edit_label = clean_smiles(getattr(args, "edit_label", "")) or "input_smiles"
-    refinement_meta = refinement_meta_from_args(args)
     ids = smiles_identity(input_smiles, input_smiles)
     existing = find_existing(existing_rows, ids)
     new_rows: list[dict[str, str | int | float]] = []
+
+    def persist_new_row(row: dict[str, str | int | float]) -> None:
+        append_csv(ledger_file, [row])
+        new_rows.append(row)
+
+    def persist_full_history() -> None:
+        write_csv(ledger_file, existing_rows + new_rows)
+
     if existing and not args.redock_existing and row_has_successful_dock(existing):
         print(f"input_exists=true seq_id={existing.get('seq_id')}", flush=True)
         if input_nickname:
@@ -978,7 +1186,7 @@ def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
             existing["parent_smiles"] = input_parent_smiles
         if input_edit_label and existing.get("edit_label") in ("", "input_smiles"):
             existing["edit_label"] = input_edit_label
-        merge_refinement_meta(existing, refinement_meta)
+        persist_full_history()
         active = [existing]
     else:
         retry_existing = bool(existing and not args.redock_existing and not row_has_successful_dock(existing))
@@ -1002,16 +1210,26 @@ def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
             vina=vina,
             meeko=meeko,
             obabel=obabel,
+            engine_args=engine_args,
             seed=args.seed,
             cluster_cutoff=args.internal_cluster_rmsd_cutoff,
         )
-        merge_refinement_meta(row, refinement_meta)
-        print(f"[dock] {seq} ancestor affinity={row.get('affinity_kcal_mol')} reason={row.get('reason', '')}", flush=True)
         if retry_existing and existing:
             update_existing_from_dock(existing, row)
+            persist_full_history()
         else:
-            new_rows.append(row)
-        active = [{key: str(value) for key, value in row.items()}]
+            persist_new_row(row)
+        print(f"[dock] {seq} ancestor affinity={row.get('affinity_kcal_mol')} reason={row.get('reason', '')}", flush=True)
+        active_row = {key: str(value) for key, value in row.items()}
+        if row_has_successful_dock(active_row):
+            active = [active_row]
+        else:
+            active = []
+            if args.max_rounds > 0:
+                print(
+                    f"analog_generation_skipped=true parent={seq} reason={row.get('reason', 'docking_failed')}",
+                    flush=True,
+                )
 
     seen = [row_identity(row) for row in existing_rows]
     seen.extend(row_identity({key: str(value) for key, value in row.items()}) for row in new_rows)
@@ -1019,7 +1237,7 @@ def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
         next_active: list[dict[str, str]] = []
         docked = 0
         for parent in active:
-            parent_smiles = parent.get("canonical_smiles") or parent.get("smiles") or ""
+            parent_smiles = row_smiles(parent)
             candidates = enumerate_edits(parent_smiles, modes)
             if not args.deterministic_batch:
                 rng.shuffle(candidates)
@@ -1049,15 +1267,17 @@ def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
                     vina=vina,
                     meeko=meeko,
                     obabel=obabel,
+                    engine_args=engine_args,
                     seed=args.seed + seq_number,
                     cluster_cutoff=args.internal_cluster_rmsd_cutoff,
                 )
+                persist_new_row(row)
                 print(
                     f"[dock] {seq} gen={generation} parent={parent.get('seq_id')} {edit_label} "
-                    f"affinity={row.get('affinity_kcal_mol')} inner={row.get('inner_rmsd', '')} whole={row.get('whole_rmsd', '')}",
+                    f"affinity={row.get('affinity_kcal_mol')} inner={row.get('inner_rmsd', '')} "
+                    f"cnn_pose={row.get('cnn_pose_score', '')} reason={row.get('reason', '')}",
                     flush=True,
                 )
-                new_rows.append(row)
                 seen.append(row_identity({key: str(value) for key, value in row.items()}))
                 if row_has_successful_dock({key: str(value) for key, value in row.items()}):
                     next_active.append({key: str(value) for key, value in row.items()})
@@ -1069,7 +1289,6 @@ def collect(args: argparse.Namespace) -> list[dict[str, str | int | float]]:
         active = next_active
         if not active:
             break
-    write_csv(ledger_file, existing_rows + new_rows)
     print(f"wrote {ledger_file} new_rows={len(new_rows)} total_rows={len(existing_rows) + len(new_rows)}", flush=True)
     return new_rows
 
@@ -1084,6 +1303,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vina")
     parser.add_argument("--meeko")
     parser.add_argument("--obabel")
+    parser.add_argument("--engine-arg", dest="engine_args", action="append", default=[], help="Extra docking-engine argument; repeat for multiple tokens, e.g. --engine-arg=--cnn_scoring --engine-arg=refinement")
     parser.add_argument("--max-rounds", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=24)
     parser.add_argument("--seed", type=int, default=42)

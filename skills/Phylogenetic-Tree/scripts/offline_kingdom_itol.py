@@ -9,15 +9,22 @@ from typing import Dict, Iterable, List
 
 
 KINGDOM_COLORS = {
-    "Bacteria": "#4E79A7",
-    "Archaea": "#B07AA1",
+    "Plant": "#A8D5BA",
+    "Animal": "#8FB8E6",
     "Fungi": "#59A14F",
-    "Plant": "#8CD17D",
-    "Animal": "#F28E2B",
-    "Virus": "#E15759",
-    "Metagenome": "#9C755F",
+    "Bacteria": "#E8A0B0",
+    "Archaea": "#F4C2A1",
+    "Protist": "#F9E79F",
+    "Metagenome": "#D5D5D5",
     "Eukaryota": "#EDC948",
-    "Unknown": "#BDBDBD",
+    "Unknown": "#AAAAAA",
+}
+
+DEFAULT_KINGDOM_STYLE = {
+    "strip_width": "25",
+    "margin": "5",
+    "border_width": "1",
+    "border_color": "#000000",
 }
 
 KINGDOM_KEYWORDS = [
@@ -37,6 +44,26 @@ def infer_kingdom(text: str) -> str:
         if any(key in lower for key in keys):
             return kingdom
     return "Unknown"
+
+
+def normalize_kingdom(kingdom: str, organism: str = "", phylum: str = "") -> str:
+    text = " ".join([kingdom or "", organism or "", phylum or ""]).lower()
+    if any(key in text for key in ["streptophyta", "viridiplantae", "plantae", "embryophyta", "tracheophyta"]):
+        return "Plant"
+    if any(key in text for key in ["fungi", "ascomycota", "basidiomycota", "saccharomyces", "fusarium", "steccherinum"]):
+        return "Fungi"
+    if any(key in text for key in ["metazoa", "animalia", "chordata", "arthropoda", "mammalia", "homo sapiens", "rattus"]):
+        return "Animal"
+    if "bacteria" in text:
+        return "Bacteria"
+    if "archaea" in text:
+        return "Archaea"
+    if "virus" in text or "viruses" in text:
+        return "Virus"
+    if kingdom and kingdom not in {"Unknown", "Eukaryota"}:
+        return kingdom
+    inferred = infer_kingdom(" ".join([organism or "", phylum or ""]))
+    return inferred
 
 
 def read_csv(path: Path) -> List[Dict[str, str]]:
@@ -87,13 +114,14 @@ def annotate_rows(
         node_id = row_id(row)
         organism = row.get("organism") or row.get("Organism") or row.get("header") or ""
         kingdom = row.get("kingdom") or row.get("Kingdom") or ""
+        phylum = row.get("phylum") or row.get("phylum_class") or row.get("Phylum") or ""
         if not kingdom or kingdom == "Unknown":
             md = seed_metadata.get(node_id) or seed_metadata.get(row.get("uniprot_id", ""))
             if md:
                 organism = organism or md.get("organism", "")
                 kingdom = md.get("kingdom", "") or infer_kingdom(organism)
-        if not kingdom or kingdom == "Unknown":
-            kingdom = infer_kingdom(organism)
+                phylum = phylum or md.get("phylum", "") or md.get("phylum_class", "")
+        kingdom = normalize_kingdom(kingdom, organism, phylum)
         out_row = dict(row)
         out_row["id"] = node_id
         out_row["organism"] = organism or row.get("organism", "")
@@ -113,12 +141,24 @@ def write_csv(path: Path, rows: List[Dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
-def write_itol(path: Path, rows: List[Dict[str, str]]) -> None:
+def write_itol(
+    path: Path,
+    rows: List[Dict[str, str]],
+    *,
+    strip_width: str = DEFAULT_KINGDOM_STYLE["strip_width"],
+    margin: str = DEFAULT_KINGDOM_STYLE["margin"],
+    border_width: str = DEFAULT_KINGDOM_STYLE["border_width"],
+    border_color: str = DEFAULT_KINGDOM_STYLE["border_color"],
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     colors = KINGDOM_COLORS
     with path.open("w", encoding="utf-8") as handle:
         handle.write("DATASET_COLORSTRIP\nSEPARATOR TAB\n")
-        handle.write("DATASET_LABEL\tKingdom_offline\nCOLOR\t#000000\nSTRIP_WIDTH\t25\nMARGIN\t5\n")
+        handle.write("DATASET_LABEL\tKingdom_offline\nCOLOR\t#000000\n")
+        handle.write(f"STRIP_WIDTH\t{strip_width}\n")
+        handle.write(f"MARGIN\t{margin}\n")
+        handle.write(f"BORDER_WIDTH\t{border_width}\n")
+        handle.write(f"BORDER_COLOR\t{border_color}\n")
         handle.write("LEGEND_TITLE\tKingdom\n")
         handle.write("LEGEND_SHAPES\t" + "\t".join(["1"] * len(colors)) + "\n")
         handle.write("LEGEND_COLORS\t" + "\t".join(colors.values()) + "\n")
@@ -138,6 +178,10 @@ def main() -> None:
     parser.add_argument("--fasta", default="/mnt/e/Tree-Metal-F/ssn/representatives.fasta")
     parser.add_argument("--seed-metadata", default="/mnt/e/Tree-Metal-F/seed_metadata.csv")
     parser.add_argument("--outdir", default="/mnt/e/Tree-Metal-F/tree_analysis")
+    parser.add_argument("--kingdom-strip-width", default=DEFAULT_KINGDOM_STYLE["strip_width"])
+    parser.add_argument("--kingdom-margin", default=DEFAULT_KINGDOM_STYLE["margin"])
+    parser.add_argument("--kingdom-border-width", default=DEFAULT_KINGDOM_STYLE["border_width"])
+    parser.add_argument("--kingdom-border-color", default=DEFAULT_KINGDOM_STYLE["border_color"])
     args = parser.parse_args()
 
     node_rows = read_csv(Path(args.nodes))
@@ -147,7 +191,14 @@ def main() -> None:
     rows = annotate_rows(node_rows, seed_metadata)
     outdir = Path(args.outdir)
     write_csv(outdir / "nodes_with_offline_kingdom.csv", rows)
-    write_itol(outdir / "itol_kingdom_color_strip_offline.txt", rows)
+    write_itol(
+        outdir / "itol_kingdom_color_strip_offline.txt",
+        rows,
+        strip_width=args.kingdom_strip_width,
+        margin=args.kingdom_margin,
+        border_width=args.kingdom_border_width,
+        border_color=args.kingdom_border_color,
+    )
     unknown = sum(1 for row in rows if row.get("kingdom") == "Unknown")
     print(f"Wrote {outdir / 'nodes_with_offline_kingdom.csv'}")
     print(f"Wrote {outdir / 'itol_kingdom_color_strip_offline.txt'}")

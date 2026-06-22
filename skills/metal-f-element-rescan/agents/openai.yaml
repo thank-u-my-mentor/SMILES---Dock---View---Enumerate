@@ -1,0 +1,3 @@
+display_name: Metal-F Element Rescan
+short_description: CCD ligand rescan for Metal-F
+default_prompt: Rescan Metal-F candidates using CCD element formulas and mmCIF F-metal geometry; export review dashboards, FASTA, and PyMOL PSE scenes while flagging duplicates and complexes.

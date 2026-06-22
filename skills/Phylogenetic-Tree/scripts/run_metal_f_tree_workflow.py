@@ -53,6 +53,7 @@ def write_simple_tree_from_core(core_fasta: Path, outdir: Path, env: Dict[str, s
         "-m", "LG+F+R4",
         "-B", "1000",
         "-T", str(threads),
+        "-redo",
         "--prefix", str(tree_dir / "iqtree_run"),
     ], env=env)
     produced = tree_dir / "iqtree_run.treefile"
@@ -67,6 +68,7 @@ def main() -> None:
     parser.add_argument("--metal-project", default="/home/qin/Metal-F_project")
     parser.add_argument("--outdir", default="/mnt/e/Tree-Metal-F")
     parser.add_argument("--min-length", type=int, default=120)
+    parser.add_argument("--exclude-pdb", nargs="*", default=[])
     parser.add_argument("--mode", choices=["core-tree", "hmmer-tree", "existing-all-tree"], default="core-tree")
     parser.add_argument("--all-fasta", default="", help="Existing homolog/all FASTA for --mode existing-all-tree.")
     parser.add_argument("--hmmer-mode", choices=["ebi-hmmsearch", "web-phmmer", "local-hmmsearch"], default="ebi-hmmsearch")
@@ -91,6 +93,7 @@ def main() -> None:
         "--metal-project", args.metal_project,
         "--outdir", str(outdir),
         "--min-length", str(args.min_length),
+        "--exclude-pdb", *args.exclude_pdb,
     ], env=env)
     core_fasta = outdir / "tree_core.fasta"
 
@@ -145,14 +148,15 @@ def main() -> None:
         ssn_dir = outdir / "ssn"
         run([
             sys.executable,
-            str(HYDROLASE_SCRIPTS / "ssn_pipeline_mmseq2.py"),
+            str(SCRIPT_DIR / "select_representatives_mmseqs.py"),
             str(hmmer_dir / "homologs_plus_core.fasta"),
             "--core-fasta", str(hmmer_dir / "core.fasta"),
             "--output", str(ssn_dir),
+            "--metadata", str(hmmer_dir / "homolog_metadata.csv"), str(outdir / "tree_core_metadata.csv"),
             "--max-rep", str(args.max_rep),
-            "--cdhit-identity", str(args.cdhit_identity),
-            "--cdhit-coverage", str(args.cdhit_coverage),
-            "--max-recon", "0",
+            "--min-seq-id", str(args.cdhit_identity),
+            "--coverage", str(args.cdhit_coverage),
+            "--threads", str(args.threads),
         ], env=env)
         write_simple_tree_from_core(ssn_dir / "representatives.fasta", outdir, env, args.threads)
 

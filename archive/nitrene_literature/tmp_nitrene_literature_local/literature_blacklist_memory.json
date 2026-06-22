@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "updated_at": "2026-06-05T13:52:10.477693",
+  "records": {
+    "doi:10.1021/acscentsci.5b00056": {
+      "status": "kept",
+      "reason": "",
+      "title": "Enantioselective Enzyme-Catalyzed Aziridination Enabled by Active-Site Evolution of a Cytochrome P450",
+      "doi": "10.1021/acscentsci.5b00056",
+      "year": 2015,
+      "journal": "ACS Central Science",
+      "paper_domain": "enzymatic non-photo",
+      "enzyme_family": "P450",
+      "topic_domain": "other",
+      "review_status": "",
+      "updated_at": "2026-06-05T13:52:10.476181"
+    },
+    "doi:10.1039/d3sc04661c": {
+      "status": "kept",
+      "reason": "",
+      "title": "Catalytic, asymmetric carbon-nitrogen bond formation using metal nitrenoids: from metal-ligand complexes via metalloporphyrins to enzymes",
+      "doi": "10.1039/D3SC04661C",
+      "year": 2023,
+      "journal": "Chemical Science",
+      "paper_domain": "enzymatic non-photo",
+      "enzyme_family": "Other_enzyme",
+      "topic_domain": "other",
+      "review_status": "",
+      "updated_at": "2026-06-05T13:52:10.476783"
+    },
+    "doi:10.1016/j.jinorgbio.2021.111613": {
+      "status": "kept",
+      "reason": "",
+      "title": "Nitrene transfers mediated by natural and artificial iron enzymes",
+      "doi": "10.1016/j.jinorgbio.2021.111613",
+      "year": 2021,
+      "journal": "Journal of Inorganic Biochemistry",
+      "paper_domain": "enzymatic non-photo",
+      "enzyme_family": "Other_enzyme",
+      "topic_domain": "other",
+      "review_status": "",
+      "updated_at": "2026-06-05T13:52:10.476795"
+    },
+    "doi:10.1021/jacs.9b11608": {
+      "status": "kept",
+      "reason": "",
+      "title": "Nitrene Transfer Catalyzed by a Non-Heme Iron Enzyme and Enhanced by Non-Native Small-Molecule Ligands",
+      "doi": "10.1021/jacs.9b11608",
+      "year": 2019,
+      "journal": "Journal of the American Chemical Society",
+      "paper_domain": "enzymatic non-photo",
+      "enzyme_family": "Other_enzyme",
+      "topic_domain": "other",
+      "review_status": "",
+      "updated_at": "2026-06-05T13:52:10.476801"
+    },
+    "doi:10.1021/ja509308v": {
+      "status": "kept",
+      "reason": "",
+      "title": "Enzyme-Controlled Nitrogen-Atom Transfer Enables Regiodivergent C-H Amination",
+      "doi": "10.1021/ja509308v",
+      "year": 2014,
+      "journal": "Journal of the American Chemical Society",
+      "paper_domain": "enzymatic non-photo",
+      "enzyme_family": "Other_enzyme",
+      "topic_domain": "other",
+      "review_status": "",
+      "updated_at": "2026-06-05T13:52:10.476806"
+    },
+    "doi:10.1038/s41570-021-00291-4": {
+      "status": "blacklisted",
+      "reason": "paper_domain=unrelated/blacklist",
+      "title": "Nitrene transfer catalysts for enantioselective C-N bond formation",
+      "doi": "10.1038/s41570-021-00291-4",
+      "year": 2021,
+      "journal": "Nature Reviews Chemistry",
+      "paper_domain": "unrelated/blacklist",
+      "enzyme_family": "no enzyme",
+      "topic_domain": "other",
+      "review_status": "",
+      "updated_at": "2026-06-05T13:52:10.476812"
+    }
+  }
+}

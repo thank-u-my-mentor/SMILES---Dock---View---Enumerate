@@ -106,7 +106,7 @@ def vina_box_signature(box: dict[str, float]) -> tuple[float, ...]:
 
 def grid_box_objective(correlation: float, target: float) -> tuple[float, float]:
     # The first optimization target is positive correlation:
-    # official binding score should rise as predicted binding-surface coverage rises.
+    # selected analysis score should rise as predicted binding-surface coverage rises.
     objective = correlation
     loss = max(0.0, target - correlation)
     return objective, loss
@@ -288,7 +288,7 @@ def evaluate_vina_box_surface_correlation(
     binding_surface_total = len(binding_surface_atoms) if metric == "atom" else len(binding_surface_labels)
     pairs: list[tuple[float, float]] = []
     for row, mode_contacts in scored_contact_rows:
-        score = safe_float(row.get("official_binding_score"))
+        score = safe_float(row.get("analysis_score"))
         if score is None or not mode_contacts or not binding_surface_total:
             continue
         coverages: list[float] = []
@@ -808,17 +808,58 @@ def mode_similarity(a: dict[str, object], b: dict[str, object]) -> float:
     return round(sum(weight * jaccard(a[key], b[key]) for key, weight in weights.items()), 6)
 
 
-def best_score_row(rows: list[dict[str, str]]) -> dict[str, str]:
-    scored = [row for row in rows if safe_float(row.get("official_binding_score")) is not None]
-    if not scored:
-        raise ValueError("analysis CSV has no official_binding_score values")
-    # In current Task2 score table, larger official score is treated as better.
-    return max(scored, key=lambda row: safe_float(row.get("official_binding_score")) or float("-inf"))
+def score_direction_for_column(column: str, requested: str) -> str:
+    if requested != "auto":
+        return requested
+    if column in {"affinity_kcal_mol", "vina_affinity", "docking_affinity"}:
+        return "lower-is-better"
+    return "higher-is-better"
 
 
-def best_score_row_with_pose(rows: list[dict[str, str]]) -> tuple[dict[str, str], list[dict[str, object]]]:
-    scored = [row for row in rows if safe_float(row.get("official_binding_score")) is not None]
-    scored.sort(key=lambda row: safe_float(row.get("official_binding_score")) or float("-inf"), reverse=True)
+def choose_score_column(rows: list[dict[str, str]], requested: str, direction: str) -> tuple[str, str]:
+    if requested != "auto":
+        return requested, score_direction_for_column(requested, direction)
+    preferred = [
+        "official_binding_score",
+        "binding_score",
+        "score",
+        "activity_score",
+        "affinity_kcal_mol",
+    ]
+    for column in preferred:
+        if any(safe_float(row.get(column)) is not None and row.get("pose_path") for row in rows):
+            return column, score_direction_for_column(column, direction)
+    raise ValueError(
+        "analysis CSV has no usable score column with pose_path. "
+        "Provide --score-column, or pass dock_history.csv with affinity_kcal_mol."
+    )
+
+
+def analysis_score(raw_score: float, direction: str) -> float:
+    return -raw_score if direction == "lower-is-better" else raw_score
+
+
+def annotate_analysis_scores(
+    rows: list[dict[str, str]],
+    requested_column: str,
+    requested_direction: str,
+) -> tuple[str, str]:
+    score_column, direction = choose_score_column(rows, requested_column, requested_direction)
+    for row in rows:
+        raw = safe_float(row.get(score_column))
+        if raw is None:
+            continue
+        score = analysis_score(raw, direction)
+        row["analysis_score"] = f"{score:.8g}"
+        row["raw_analysis_score"] = f"{raw:.8g}"
+        row["analysis_score_source"] = score_column
+        row["analysis_score_direction"] = direction
+    return score_column, direction
+
+
+def best_score_row_with_pose(rows: list[dict[str, str]], score_field: str = "analysis_score") -> tuple[dict[str, str], list[dict[str, object]]]:
+    scored = [row for row in rows if safe_float(row.get(score_field)) is not None]
+    scored.sort(key=lambda row: safe_float(row.get(score_field)) or float("-inf"), reverse=True)
     for row in scored:
         modes = parse_pdbqt_modes(Path(row.get("pose_path", "")).expanduser())
         if modes:
@@ -927,7 +968,8 @@ def write_pymol_view(
     save_pse: bool,
 ) -> None:
     lines = [
-        "reinitialize",
+        "delete all",
+        "set mouse_selection_mode, 1",
         f"load {receptor_path}, receptor",
         f"load {ligand_pdb_path}, ligand_mode",
         f"load {pocket_pdb_path}, pocket_atoms",
@@ -944,22 +986,22 @@ def write_pymol_view(
         "color sulfur, ligand_mode and element S",
         "set sphere_scale, 0.18, ligand_mode",
         "show surface, predicted_binding_surface",
-        "color lime, predicted_binding_surface",
-        "set transparency, 0.25, predicted_binding_surface",
-        "show sticks, predicted_binding_surface and (sidechain or name CA)",
+        "color green, predicted_binding_surface",
+        "set transparency, 0.30, predicted_binding_surface",
+        "show sticks, predicted_binding_surface and polymer and (sidechain or name CA)",
+        "show spheres, predicted_binding_surface and not polymer",
         "set stick_radius, 0.15, predicted_binding_surface",
-        "color nitrogen, predicted_binding_surface and element N",
-        "color oxygen, predicted_binding_surface and element O",
-        "color sulfur, predicted_binding_surface and element S",
         "select contact_4a, byres (receptor within 4.0 of ligand_mode)",
-        "show sticks, contact_4a and (sidechain or name CA)",
-        "color tv_orange, contact_4a",
+        "show sticks, contact_4a and polymer and (sidechain or name CA)",
+        "show spheres, contact_4a and not polymer",
         "select predicted_surface_contact_4a, byres (predicted_binding_surface within 4.0 of ligand_mode)",
-        "show sticks, predicted_surface_contact_4a and (sidechain or name CA)",
-        "color tv_orange, predicted_surface_contact_4a",
+        "show sticks, predicted_surface_contact_4a and polymer and (sidechain or name CA)",
+        "show spheres, predicted_surface_contact_4a and not polymer",
+        "color green, predicted_binding_surface",
         "set field_of_view, 18",
         "zoom ligand_mode or predicted_binding_surface, 10",
         "center ligand_mode",
+        "deselect",
         f"print('{title}')",
     ]
     if save_pse:
@@ -982,6 +1024,11 @@ def save_pymol_session(pml_path: Path) -> bool:
 
 def infer(args: argparse.Namespace) -> None:
     analysis_rows = read_csv(args.analysis_csv.expanduser().resolve())
+    score_column, score_direction = annotate_analysis_scores(
+        analysis_rows,
+        requested_column=args.score_column,
+        requested_direction=args.score_direction,
+    )
     receptor_path = args.receptor.expanduser().resolve()
     receptor_atoms = read_receptor_atoms(receptor_path)
     receptor_residues = receptor_residue_index(receptor_atoms)
@@ -1001,7 +1048,7 @@ def infer(args: argparse.Namespace) -> None:
     outdir = args.outdir.expanduser().resolve()
     outdir.mkdir(parents=True, exist_ok=True)
     vina_box = parse_vina_config(args.config.expanduser().resolve()) if args.config else {}
-    scored_rows = [row for row in analysis_rows if safe_float(row.get("official_binding_score")) is not None and row.get("pose_path")]
+    scored_rows = [row for row in analysis_rows if safe_float(row.get("analysis_score")) is not None and row.get("pose_path")]
     scored_mode_rows: list[tuple[dict[str, str], list[dict[str, object]]]] = [
         (row, parse_pdbqt_modes(Path(row["pose_path"]).expanduser()))
         for row in scored_rows
@@ -1116,7 +1163,7 @@ def infer(args: argparse.Namespace) -> None:
     residue_support: defaultdict[str, float] = defaultdict(float)
 
     for row, modes in scored_mode_rows:
-        score = safe_float(row.get("official_binding_score")) or 0.0
+        score = safe_float(row.get("analysis_score")) or 0.0
         for mode in modes:
             features = contact_features(
                 mode["atoms"],
@@ -1144,6 +1191,9 @@ def infer(args: argparse.Namespace) -> None:
                     "seq_id": row.get("seq_id", ""),
                     "nickname": row.get("nickname", ""),
                     "official_binding_score": row.get("official_binding_score", ""),
+                    "analysis_score": row.get("analysis_score", ""),
+                    "analysis_score_source": row.get("analysis_score_source", ""),
+                    "raw_analysis_score": row.get("raw_analysis_score", ""),
                     "ligand_pose_path": row.get("pose_path", ""),
                     "ligand_mode": mode["mode"],
                     "ligand_mode_affinity": mode.get("affinity", ""),
@@ -1163,6 +1213,12 @@ def infer(args: argparse.Namespace) -> None:
             )
 
     summary_rows: list[dict[str, object]] = []
+    standard_smiles = (
+        standard_row.get("smiles")
+        or standard_row.get("canonical_smiles")
+        or standard_row.get("input_smiles")
+        or ""
+    )
     for mode in standard_modes:
         index = int(mode["mode"])
         features = standard_features[index]
@@ -1189,8 +1245,12 @@ def infer(args: argparse.Namespace) -> None:
             {
                 "standard_seq_id": standard_row.get("seq_id", ""),
                 "standard_score": standard_row.get("official_binding_score", ""),
-                "standard_input_smiles": standard_row.get("input_smiles", ""),
-                "standard_canonical_smiles": standard_row.get("canonical_smiles", ""),
+                "standard_analysis_score": standard_row.get("analysis_score", ""),
+                "analysis_score_source": standard_row.get("analysis_score_source", ""),
+                "raw_standard_analysis_score": standard_row.get("raw_analysis_score", ""),
+                "standard_smiles": standard_smiles,
+                "standard_input_smiles": standard_smiles,
+                "standard_canonical_smiles": standard_smiles,
                 "standard_pose_path": standard_row.get("pose_path", ""),
                 "standard_mode": index,
                 "standard_mode_affinity": mode.get("affinity", ""),
@@ -1234,7 +1294,7 @@ def infer(args: argparse.Namespace) -> None:
         ranked_pml = visualization_dir / f"{view_base}.pml"
         ranked_pse = visualization_dir / f"{view_base}.pse"
         title = (
-            f"{view_base} score={row['standard_score']} support={row['support_count']} "
+            f"{view_base} analysis_score={row['standard_analysis_score']} support={row['support_count']} "
             f"pose={row['standard_pose_path']}"
         )
         write_pymol_view(
@@ -1274,6 +1334,10 @@ def infer(args: argparse.Namespace) -> None:
         [
             "standard_seq_id",
             "standard_score",
+            "standard_analysis_score",
+            "analysis_score_source",
+            "raw_standard_analysis_score",
+            "standard_smiles",
             "standard_input_smiles",
             "standard_canonical_smiles",
             "standard_pose_path",
@@ -1304,6 +1368,9 @@ def infer(args: argparse.Namespace) -> None:
             "seq_id",
             "nickname",
             "official_binding_score",
+            "analysis_score",
+            "analysis_score_source",
+            "raw_analysis_score",
             "ligand_pose_path",
             "ligand_mode",
             "ligand_mode_affinity",
@@ -1328,7 +1395,9 @@ def infer(args: argparse.Namespace) -> None:
     )
     write_csv(outdir / "consensus_residue_contacts.csv", residue_rows, ["residue", "score_weighted_support"])
     print(
-        f"standard_seq_id={standard_row.get('seq_id')} standard_score={standard_row.get('official_binding_score')} "
+        f"standard_seq_id={standard_row.get('seq_id')} "
+        f"score_column={score_column} score_direction={score_direction} "
+        f"standard_analysis_score={standard_row.get('analysis_score')} "
         f"standard_modes={len(standard_modes)} scored_rows={len(scored_rows)} surface_method={surface_method} "
         f"binding_surface_residues={len(binding_surface_labels)} binding_surface_source={binding_surface_source} wrote={outdir}",
         flush=True,
@@ -1342,12 +1411,14 @@ def main() -> None:
     parser.add_argument("--receptor", type=Path, required=True)
     parser.add_argument("--config", type=Path, help="Optional Vina config; center/size define the predicted binding surface region")
     parser.add_argument("--outdir", type=Path, required=True)
+    parser.add_argument("--score-column", default="auto", help="Score column for choosing the reference pose; auto prefers official_binding_score, then affinity_kcal_mol")
+    parser.add_argument("--score-direction", choices=["auto", "higher-is-better", "lower-is-better"], default="auto", help="Whether larger or smaller values in --score-column are better")
     parser.add_argument("--pocket-cutoff", type=float, default=5.0)
     parser.add_argument("--surface-neighbor-cutoff", type=float, default=10.0)
     parser.add_argument("--surface-area-quantile", type=float, default=0.35, help="Top fraction of receptor residues by PyMOL SASA treated as surface-like")
     parser.add_argument("--grid-surface-padding", type=float, default=4.0, help="Extra Angstrom padding around the Vina grid when selecting predicted binding-surface residues")
     parser.add_argument("--surface-only-grid-residues", dest="include_buried_grid_residues", action="store_false", help="Restrict predicted binding surface to SASA surface-like residues inside the Vina grid")
-    parser.add_argument("--tune-grid-box", action="store_true", help="Locally tune the Vina grid box to maximize correlation between binding-surface coverage and official binding score")
+    parser.add_argument("--tune-grid-box", action="store_true", help="Locally tune the Vina grid box to maximize correlation between binding-surface coverage and the selected analysis score")
     parser.add_argument("--grid-tune-iterations", type=int, default=12, help="Maximum local-search iterations for --tune-grid-box")
     parser.add_argument("--grid-tune-restarts", type=int, default=6, help="Number of extra deterministic starting points for --tune-grid-box")
     parser.add_argument("--grid-tune-max-steps", type=int, default=1000, help="Maximum candidate boxes to evaluate for --tune-grid-box")

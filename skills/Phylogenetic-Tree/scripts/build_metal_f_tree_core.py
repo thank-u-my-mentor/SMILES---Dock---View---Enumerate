@@ -127,7 +127,7 @@ def load_literature(project: Path) -> Dict[str, Dict[str, str]]:
     return by_pdb
 
 
-def collect_csv_rows(project: Path, min_length: int) -> List[Dict[str, str]]:
+def collect_csv_rows(project: Path, min_length: int, exclude_pdb: set[str]) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
     files = [project / "Metal-F_protein_entities.csv", *project.glob("Metal-*/*_protein_entities_kept.csv")]
     literature = load_literature(project)
@@ -138,6 +138,8 @@ def collect_csv_rows(project: Path, min_length: int) -> List[Dict[str, str]]:
             if len(seq) < min_length:
                 continue
             pdb_id = (row.get("pdb_id", "") or "").upper()
+            if pdb_id in exclude_pdb:
+                continue
             lit = literature.get(pdb_id, {})
             uid = primary_uniprot(row.get("uniprot_ids", ""))
             seq_id = uid or f"{pdb_id}_{row.get('entity_id', '1')}"
@@ -161,7 +163,7 @@ def collect_csv_rows(project: Path, min_length: int) -> List[Dict[str, str]]:
     return rows
 
 
-def collect_fasta_rows(project: Path, min_length: int) -> List[Dict[str, str]]:
+def collect_fasta_rows(project: Path, min_length: int, exclude_pdb: set[str]) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
     files = [project / "Metal-F_protein_entities.fasta", *project.glob("Metal-*/*_hmmer_full_length_seed.fasta")]
     for path in files:
@@ -170,13 +172,16 @@ def collect_fasta_rows(project: Path, min_length: int) -> List[Dict[str, str]]:
             if len(seq) < min_length:
                 continue
             meta = parse_header_meta(header)
+            pdb_id = meta.get("pdb_id", "").upper()
+            if pdb_id in exclude_pdb:
+                continue
             uid = primary_uniprot(meta.get("uniprot_ids", ""))
             seq_id = uid or meta.get("header_id") or hashlib.sha1(seq.encode()).hexdigest()[:12]
             rows.append({
                 "seed_id": safe_id(seq_id),
                 "set_name": set_name,
                 "source_file": str(path),
-                "pdb_id": meta.get("pdb_id", ""),
+                "pdb_id": pdb_id,
                 "entity_id": meta.get("entity_id", ""),
                 "chains": meta.get("chains", ""),
                 "sequence_length": str(len(seq)),
@@ -238,11 +243,13 @@ def main() -> None:
     parser.add_argument("--metal-project", default="/home/qin/Metal-F_project")
     parser.add_argument("--outdir", default="/mnt/e/Tree-Metal-F")
     parser.add_argument("--min-length", type=int, default=120)
+    parser.add_argument("--exclude-pdb", nargs="*", default=[])
     args = parser.parse_args()
 
     project = Path(args.metal_project)
     outdir = Path(args.outdir)
-    rows = collect_csv_rows(project, args.min_length) + collect_fasta_rows(project, args.min_length)
+    exclude_pdb = {p.upper() for p in args.exclude_pdb}
+    rows = collect_csv_rows(project, args.min_length, exclude_pdb) + collect_fasta_rows(project, args.min_length, exclude_pdb)
     deduped = dedupe_rows(rows)
     fields = [
         "seed_id", "set_name", "source_file", "pdb_id", "entity_id", "chains",

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sequence Seed Review</title>
+<style>
+:root { color-scheme: light; --ink:#17202a; --muted:#64748b; --line:#d6dee8; --bg:#f5f7fa; --panel:#ffffff; --soft:#eef4f7; --accent:#006d77; --good:#0f766e; --warn:#9a5b00; --bad:#9f1239; --blue:#285a8d; --violet:#6d4bb3; --amber:#b7791f; }
+* { box-sizing:border-box; }
+body { margin:0; font:13px/1.42 system-ui, -apple-system, Segoe UI, sans-serif; color:var(--ink); background:var(--bg); }
+header { padding:18px 24px 12px; background:linear-gradient(180deg, #ffffff 0%, #f7fbfc 100%); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; box-shadow:0 10px 28px rgba(22, 34, 51, .06); }
+h1 { margin:0; font-size:21px; letter-spacing:0; }
+.sub { color:var(--muted); max-width:1160px; margin-top:5px; }
+.stats { display:grid; grid-template-columns:repeat(auto-fit, minmax(178px, 1fr)); gap:8px; margin-top:12px; }
+.stat { border:1px solid var(--line); background:#fbfdff; padding:8px 10px; border-radius:6px; min-width:0; display:flex; justify-content:space-between; gap:12px; box-shadow:0 2px 10px rgba(15, 23, 42, .035); transition:transform .16s ease, box-shadow .16s ease, border-color .16s ease; }
+.stat:hover { transform:translateY(-1px); box-shadow:0 8px 18px rgba(15, 23, 42, .08); border-color:#9ccfca; }
+.stat b { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.stat span { font-weight:700; color:var(--accent); }
+.stat-total { background:#e8f4f3; border-color:#9ccfca; }
+.toolbar { display:grid; grid-template-columns:minmax(260px, 1.6fr) repeat(7, minmax(145px, 1fr)); gap:8px; padding:10px 24px; background:rgba(238,244,247,.94); backdrop-filter:blur(8px); border-bottom:1px solid var(--line); position:sticky; top:129px; z-index:4; }
+input, select { height:34px; min-width:0; border:1px solid var(--line); border-radius:6px; padding:0 9px; background:white; color:var(--ink); transition:border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
+input:focus, select:focus { outline:none; border-color:#5aa7a7; box-shadow:0 0 0 3px rgba(0, 109, 119, .14); }
+select:hover, input:hover { border-color:#9bb4c8; }
+main { padding:16px 24px 30px; }
+table { border-collapse:collapse; width:100%; background:var(--panel); border:1px solid var(--line); table-layout:fixed; box-shadow:0 18px 45px rgba(15, 23, 42, .07); }
+th, td { border-bottom:1px solid var(--line); vertical-align:top; padding:8px 9px; word-break:break-word; }
+th { text-align:left; background:#f1f5f8; position:sticky; top:184px; z-index:3; font-size:12px; color:#334155; }
+tbody tr { animation:rowIn .26s ease both; border-left:4px solid transparent; transition:transform .12s ease, box-shadow .12s ease, background .12s ease, border-color .12s ease; }
+tbody tr:hover { transform:translateX(2px); box-shadow:inset 4px 0 0 #9ccfca; }
+tbody tr[data-dependency="confirmed_flavin_dependent"] { border-left-color:#38a169; }
+tbody tr[data-dependency="likely_flavin_dependent"] { border-left-color:#3182ce; }
+tbody tr[data-dependency="mixed_or_review"] { border-left-color:#d69e2e; }
+tbody tr[data-dependency^="non_flavin"] { border-left-color:#d53f8c; }
+tr:hover td { background:#fbfdff; }
+.pill { display:inline-block; padding:2px 7px; border-radius:999px; font-size:12px; border:1px solid var(--line); background:#f8fafc; white-space:nowrap; margin:0 4px 4px 0; transition:transform .14s ease; }
+.pill:hover { transform:translateY(-1px); }
+.specific_with_organism, .confirmed_flavin_dependent { color:var(--good); border-color:#86c5b9; background:#eaf8f5; }
+.likely_flavin_dependent, .specific_missing_organism { color:var(--blue); border-color:#9ebee1; background:#edf5ff; }
+.mixed_or_review, .unknown, .unknown_or_nadph_only, .family_only, .review_or_family_context { color:var(--warn); border-color:#e4bd75; background:#fff7e6; }
+.non_flavin_exclude, .non_flavin_thdp, .non_flavin_pqq, .non_flavin_plp, .non_flavin_heme { color:var(--bad); border-color:#e5a3af; background:#fff0f3; }
+.supplement_accession_first, .pdb_first, .methods_gene_name_first { color:var(--violet); border-color:#c2b5ee; background:#f3f0ff; }
+.pdb_search_first { color:#5f6b7a; border-color:#cbd5e1; background:#f8fafc; }
+.thdp { color:#8a4b18; border-color:#f1bf98; background:#fff2e8; }
+.flavin { color:#26655a; border-color:#a4d7cb; background:#ecfbf7; }
+.flavin_enzyme_external_photoredox, .likely_flavin_enzyme_external_photoredox { color:#7c3aed; border-color:#c4b5fd; background:#f5f3ff; }
+.flavin_enzyme_only_or_unclear_photoredox { color:#0f766e; border-color:#99f6e4; background:#ecfeff; }
+.non_flavin_enzyme_external_photoredox { color:#be123c; border-color:#fecdd3; background:#fff1f2; }
+.small { color:var(--muted); font-size:12px; margin-top:3px; }
+.title { width:25%; }
+.enzyme { width:19%; }
+.dependency { width:17%; }
+.links { width:18%; }
+.evidence { max-height:9.2em; overflow:auto; }
+a { color:var(--accent); text-decoration:none; font-weight:500; }
+a:hover { text-decoration:underline; }
+.links a { display:block; margin-bottom:3px; }
+@keyframes rowIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+@media (max-width: 980px) {
+  header { position:static; }
+  .toolbar { position:static; grid-template-columns:1fr 1fr; }
+  th { position:static; }
+  table { table-layout:auto; min-width:980px; }
+  main { overflow:auto; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>Sequence Seed Review</h1>
+  <div class="sub">Offline evidence table for flavin-dependence, enzyme function, organism source, PDB-first routes, and FASTA seed readiness.</div>
+  <div class="stats"><div class='stat stat-total'><b>Total rows</b><span>0</span></div></div>
+</header>
+<div class="toolbar">
+  <input id="q" placeholder="Search title, enzyme, organism, DOI, reaction">
+  <select id="dependency"><option value="">All dependencies</option></select>
+  <select id="cofactor"><option value="">All cofactors</option></select>
+  <select id="systemClass"><option value="">All systems</option></select>
+  <select id="functionClass"><option value="">All functions</option></select>
+  <select id="status"><option value="">All readiness</option></select>
+  <select id="route"><option value="">All routes</option></select>
+  <select id="pdb"><option value="">All PDB</option><option value="yes">PDB present</option><option value="no">No PDB</option></select>
+</div>
+<main>
+<table id="tbl">
+<thead><tr>
+<th class="dependency">Dependency</th><th class="enzyme">Specific Enzyme</th><th>Organism / Route</th><th class="links">Sequence Links</th><th class="title">Paper / Evidence</th><th>Reaction</th>
+</tr></thead>
+<tbody>
+
+</tbody>
+</table>
+</main>
+<script>
+const q = document.getElementById('q');
+const status = document.getElementById('status');
+const dependency = document.getElementById('dependency');
+const cofactor = document.getElementById('cofactor');
+const systemClass = document.getElementById('systemClass');
+const functionClass = document.getElementById('functionClass');
+const route = document.getElementById('route');
+const pdb = document.getElementById('pdb');
+const rows = [...document.querySelectorAll('tbody tr')];
+function apply() {
+  const needle = q.value.toLowerCase();
+  const filters = {
+    status: status.value,
+    dependency: dependency.value,
+    cofactor: cofactor.value,
+    systemClass: systemClass.value,
+    functionClass: functionClass.value,
+    route: route.value,
+  };
+  rows.forEach(row => {
+    const okText = !needle || row.innerText.toLowerCase().includes(needle);
+    const okStatus = !filters.status || row.dataset.status === filters.status;
+    const okDep = !filters.dependency || row.dataset.dependency === filters.dependency;
+    const okCofactor = !filters.cofactor || row.dataset.cofactor === filters.cofactor;
+    const okSystem = !filters.systemClass || row.dataset.systemClass === filters.systemClass;
+    const okFunction = !filters.functionClass || row.dataset.functionClass === filters.functionClass;
+    const okRoute = !filters.route || row.dataset.route === filters.route;
+    const okPdb = !pdb.value || row.dataset.pdb === pdb.value;
+    row.style.display = okText && okStatus && okDep && okCofactor && okSystem && okFunction && okRoute && okPdb ? '' : 'none';
+  });
+}
+q.addEventListener('input', apply);
+status.addEventListener('input', apply);
+dependency.addEventListener('input', apply);
+cofactor.addEventListener('input', apply);
+systemClass.addEventListener('input', apply);
+functionClass.addEventListener('input', apply);
+route.addEventListener('input', apply);
+pdb.addEventListener('input', apply);
+</script>
+</body></html>

@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: pocket-ligand-explorer
+Version: 0.1.0
+Summary: Project-directory CLI for no-official-score ligand docking and pose-guided box focusing
+Requires-Python: >=3.10
+Requires-Dist: numpy>=1.23
+Requires-Dist: scikit-learn>=1.2
+Requires-Dist: vina>=1.2.7

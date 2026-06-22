@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pocket-ligand-explorer"
+version = "0.1.0"
+description = "Project-directory CLI for no-official-score ligand docking and pose-guided box focusing"
+requires-python = ">=3.10"
+dependencies = [
+  "biopython>=1.83",
+  "numpy>=1.23",
+  "scikit-learn>=1.2",
+  "vina>=1.2.7",
+]
+
+[project.scripts]
+ple = "pocket_ligand_explorer.cli:main"
+ple-vina = "pocket_ligand_explorer.vina_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

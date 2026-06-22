@@ -47,6 +47,10 @@ class Hit:
     evalue: Optional[float] = None
     score: Optional[float] = None
     description: str = ""
+    organism: str = ""
+    kingdom: str = ""
+    phylum: str = ""
+    taxid: str = ""
 
 
 def infer_kingdom(text: str) -> str:
@@ -177,11 +181,47 @@ def poll_result(api_base: str, job_id: str, timeout: int, poll_seconds: int, max
             raise RuntimeError(f"HMMER result failed: HTTP {response.status_code}\n{last_text}")
         data = response.json()
         status = str(data.get("status", "")).upper()
-        if status in {"PENDING", "RUNNING", "QUEUED"}:
+        if status in {"PENDING", "RUNNING", "QUEUED", "STARTED", "SUBMITTED"}:
+            time.sleep(poll_seconds)
+            continue
+        if data.get("result") is None and status not in {"SUCCESS", "DONE", "FINISHED", "COMPLETED"}:
             time.sleep(poll_seconds)
             continue
         return data
     raise TimeoutError(f"Timed out waiting for HMMER job {job_id}: {last_text}")
+
+
+def fetch_result_pages(api_base: str, job_id: str, max_hits: int, timeout: int) -> Dict:
+    import requests
+
+    session = requests.Session()
+    session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/json"})
+    url = urljoin(api_base.rstrip("/") + "/", f"result/{job_id}")
+    merged: Optional[Dict] = None
+    all_hits: List[Dict] = []
+    page = 1
+    while len(all_hits) < max_hits:
+        response = session.get(url, params={"page": page}, timeout=timeout)
+        if response.status_code != 200:
+            raise RuntimeError(f"HMMER page fetch failed for page {page}: HTTP {response.status_code}\n{response.text[:1000]}")
+        data = response.json()
+        status = str(data.get("status", "")).upper()
+        if status not in {"SUCCESS", "DONE", "FINISHED", "COMPLETED"}:
+            raise RuntimeError(f"HMMER page fetch saw non-final status {status} on page {page}")
+        if merged is None:
+            merged = data
+        hits = ((data.get("result") or {}).get("hits") or [])
+        if not hits:
+            break
+        all_hits.extend(hits)
+        page_count = data.get("page_count")
+        if page_count and page >= int(page_count):
+            break
+        page += 1
+    if merged is None:
+        raise RuntimeError("No HMMER result pages could be fetched.")
+    merged.setdefault("result", {})["hits"] = all_hits[:max_hits]
+    return merged
 
 
 def extract_hits(payload: object) -> List[Hit]:
@@ -190,16 +230,35 @@ def extract_hits(payload: object) -> List[Hit]:
     def walk(obj: object) -> None:
         if isinstance(obj, dict):
             keys = {str(k).lower(): k for k in obj.keys()}
+            metadata = obj.get(keys.get("metadata", ""), {}) if "metadata" in keys else {}
+            metadata = metadata if isinstance(metadata, dict) else {}
+            acc = (
+                metadata.get("uniprot_accession")
+                or metadata.get("accession")
+                or metadata.get("identifier")
+                or ""
+            )
             acc_key = next((keys[k] for k in ("acc", "accession", "target", "name") if k in keys), None)
-            if acc_key is not None:
-                acc = clean_accession(str(obj.get(acc_key, "")))
+            if not acc and acc_key is not None:
+                acc = str(obj.get(acc_key, ""))
+            if acc:
+                acc = clean_accession(str(acc))
                 if acc and acc.lower() not in {"none", "unknown", "query"}:
                     evalue = maybe_float(obj.get(keys.get("evalue", "")) or obj.get(keys.get("e-value", "")))
                     score = maybe_float(obj.get(keys.get("score", "")) or obj.get(keys.get("bits", "")) or obj.get(keys.get("bit_score", "")))
-                    desc = str(obj.get(keys.get("desc", ""), "") or obj.get(keys.get("description", ""), ""))
+                    desc = str(
+                        metadata.get("description", "")
+                        or metadata.get("species", "")
+                        or obj.get(keys.get("desc", ""), "")
+                        or obj.get(keys.get("description", ""), "")
+                    )
+                    organism = str(metadata.get("species", "") or "")
+                    kingdom = str(metadata.get("kingdom", "") or "")
+                    phylum = str(metadata.get("phylum", "") or "")
+                    taxid = str(metadata.get("taxonomy_id", "") or "")
                     old = hits.get(acc)
                     if old is None or ((evalue if evalue is not None else 1e99) < (old.evalue if old.evalue is not None else 1e99)):
-                        hits[acc] = Hit(acc, evalue, score, desc)
+                        hits[acc] = Hit(acc, evalue, score, desc, organism, kingdom, phylum, taxid)
             for value in obj.values():
                 walk(value)
         elif isinstance(obj, list):
@@ -220,37 +279,52 @@ def download_uniprot_fastas(accessions: Sequence[str], retries: int = 2) -> List
         if idx % 100 == 0:
             print(f"Downloaded {len(records)}/{idx - 1} UniProt FASTA records...")
         for attempt in range(retries + 1):
-            response = session.get(UNIPROT_FASTA.format(accession=accession), timeout=30)
-            if response.status_code == 200 and response.text.startswith(">"):
-                tmp = Path("__tmp_uniprot_fetch.fasta")
-                tmp.write_text(response.text, encoding="utf-8")
-                try:
-                    records.extend(read_fasta(tmp))
-                finally:
-                    tmp.unlink(missing_ok=True)
-                break
-            if response.status_code in {400, 404}:
-                break
+            try:
+                response = session.get(UNIPROT_FASTA.format(accession=accession), timeout=30)
+                if response.status_code == 200 and response.text.startswith(">"):
+                    tmp = Path("__tmp_uniprot_fetch.fasta")
+                    tmp.write_text(response.text, encoding="utf-8")
+                    try:
+                        records.extend(read_fasta(tmp))
+                    finally:
+                        tmp.unlink(missing_ok=True)
+                    break
+                if response.status_code in {400, 404}:
+                    break
+            except Exception as exc:
+                if attempt >= retries:
+                    print(f"WARNING: failed to download {accession}: {exc}")
             time.sleep(1.0 * (attempt + 1))
     return records
 
 
-def fasta_metadata(records: Sequence[FastaRecord]) -> List[Dict[str, str]]:
+def fasta_metadata(records: Sequence[FastaRecord], hits: Sequence[Hit] = ()) -> List[Dict[str, str]]:
+    hit_md = {hit.accession: hit for hit in hits}
     rows: List[Dict[str, str]] = []
     for rec in records:
         header = rec.header
         accession = clean_accession(rec.id)
+        hit = hit_md.get(accession)
         organism = ""
         taxid = ""
         if " OS=" in header:
             organism = header.split(" OS=", 1)[1].split(" OX=", 1)[0].strip()
         if " OX=" in header:
             taxid = header.split(" OX=", 1)[1].split()[0].strip()
+        if not organism:
+            match = re.search(r"(?:^|\s)organism=([^=]+?)(?=\s+\w+=|$)", header)
+            if match:
+                organism = match.group(1).strip()
+        header_kingdom = ""
+        match = re.search(r"(?:^|\s)kingdom=([^=]+?)(?=\s+\w+=|$)", header)
+        if match:
+            header_kingdom = match.group(1).strip()
         rows.append({
             "accession": accession,
-            "organism": organism,
-            "taxid": taxid,
-            "kingdom": infer_kingdom(organism),
+            "organism": organism or (hit.organism if hit else ""),
+            "taxid": taxid or (hit.taxid if hit else ""),
+            "kingdom": header_kingdom or (hit.kingdom if hit else "") or infer_kingdom(organism),
+            "phylum": hit.phylum if hit else "",
             "length": str(len(rec.sequence)),
             "header": header,
         })
@@ -274,14 +348,23 @@ def dedupe_records(records: Sequence[FastaRecord], max_total: int) -> List[Fasta
 def write_hits_csv(hits: Sequence[Hit], path: Path) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["accession", "evalue", "score", "description"])
+        writer.writerow(["accession", "evalue", "score", "description", "organism", "kingdom", "phylum", "taxid"])
         for hit in hits:
-            writer.writerow([hit.accession, hit.evalue if hit.evalue is not None else "", hit.score if hit.score is not None else "", hit.description])
+            writer.writerow([
+                hit.accession,
+                hit.evalue if hit.evalue is not None else "",
+                hit.score if hit.score is not None else "",
+                hit.description,
+                hit.organism,
+                hit.kingdom,
+                hit.phylum,
+                hit.taxid,
+            ])
 
 
 def write_metadata_csv(rows: Sequence[Dict[str, str]], path: Path) -> None:
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["accession", "organism", "taxid", "kingdom", "length", "header"])
+        writer = csv.DictWriter(handle, fieldnames=["accession", "organism", "taxid", "kingdom", "phylum", "length", "header"])
         writer.writeheader()
         writer.writerows(rows)
 
@@ -303,6 +386,7 @@ def main() -> None:
     parser.add_argument("--timeout", type=int, default=60)
     parser.add_argument("--poll-seconds", type=int, default=5)
     parser.add_argument("--max-polls", type=int, default=720)
+    parser.add_argument("--resume-job-id", default="", help="Reuse an existing EBI HMMER job id instead of submitting a new search.")
     args = parser.parse_args()
 
     outdir = Path(args.outdir)
@@ -315,31 +399,52 @@ def main() -> None:
     domain_evalue = args.domain_evalue or args.evalue
     report_evalue = args.report_evalue or args.evalue
     report_domain_evalue = args.report_domain_evalue or domain_evalue
-    alignment_text = aligned.read_text(encoding="utf-8", errors="replace")
-    job_id = submit_hmmsearch(
-        alignment_text,
-        args.api_base,
-        args.database,
-        args.evalue,
-        domain_evalue,
-        report_evalue,
-        report_domain_evalue,
-        args.timeout,
-    )
+    if args.resume_job_id:
+        job_id = args.resume_job_id.strip()
+    else:
+        alignment_text = aligned.read_text(encoding="utf-8", errors="replace")
+        job_id = submit_hmmsearch(
+            alignment_text,
+            args.api_base,
+            args.database,
+            args.evalue,
+            domain_evalue,
+            report_evalue,
+            report_domain_evalue,
+            args.timeout,
+        )
     (outdir / "hmmer_job_id.txt").write_text(job_id + "\n", encoding="utf-8")
-    result = poll_result(args.api_base, job_id, args.timeout, args.poll_seconds, args.max_polls)
+    initial_result = (
+        fetch_result_pages(args.api_base, job_id, 1, args.timeout)
+        if args.resume_job_id
+        else poll_result(args.api_base, job_id, args.timeout, args.poll_seconds, args.max_polls)
+    )
+    result = fetch_result_pages(args.api_base, job_id, args.max_hits, args.timeout)
+    result["initial_result_status"] = initial_result.get("status") if isinstance(initial_result, dict) else ""
     (outdir / "hmmer_result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
 
     hits = extract_hits(result)[:args.max_hits]
     write_hits_csv(hits, outdir / "hmmer_hits.csv")
+    if not hits:
+        status = result.get("status", "UNKNOWN") if isinstance(result, dict) else "UNKNOWN"
+        stats = (result.get("result") or {}).get("stats", {}) if isinstance(result, dict) else {}
+        raise RuntimeError(
+            "EBI HMMER hmmsearch completed without parsable UniProt hits. "
+            f"status={status}; stats={stats}; inspect {outdir / 'hmmer_result.json'}"
+        )
     homologs = download_uniprot_fastas([hit.accession for hit in hits])
     seeds = read_fasta(input_fasta)
     homolog_only = dedupe_records(homologs, args.max_hits)
     combined = dedupe_records(seeds + homologs, args.max_total)
+    if len(combined) <= len(seeds):
+        raise RuntimeError(
+            "No new homolog FASTA records were downloaded; refusing to continue with core-only output. "
+            f"hits={len(hits)} seeds={len(seeds)} downloaded={len(homologs)}"
+        )
     write_fasta(seeds, outdir / "core.fasta")
     write_fasta(homolog_only, outdir / "homologs.fasta")
     write_fasta(combined, outdir / "homologs_plus_core.fasta")
-    write_metadata_csv(fasta_metadata(combined), outdir / "homolog_metadata.csv")
+    write_metadata_csv(fasta_metadata(combined, hits), outdir / "homolog_metadata.csv")
 
     print(f"HMMER job id: {job_id}")
     print(f"Hits parsed: {len(hits)}")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Build Pure-SMILES and structural-interaction spaces, then learn binding score."""
+"""Build Pure-SMILES and structural-interaction spaces for docking-history triage."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ HISTORY_FIELDS = [
     "official_binding_score",
     "affinity_kcal_mol",
     "inner_rmsd",
-    "whole_rmsd",
+    "cnn_pose_score",
     "hbond_count",
     "hydrophobic_count",
     "pi_contact_count",
@@ -77,7 +77,7 @@ POCKET_EMBEDDING_FIELDS = [*POCKET_GEOMETRY_FIELDS, *POCKET_PHYSCHEM_FIELDS]
 STRUCTURAL_FEATURES = [
     "affinity_kcal_mol",
     "inner_rmsd",
-    "whole_rmsd",
+    "cnn_pose_score",
     "hbond_count",
     "hydrophobic_count",
     "pi_contact_count",
@@ -563,11 +563,70 @@ def merge_analysis_scores(history_rows: list[dict[str, str]], analysis_rows: lis
             row["official_binding_score"] = by_can[can]
 
 
+def resolve_score_column(rows: list[dict[str, str]], requested_column: str) -> str:
+    if requested_column != "auto":
+        return requested_column
+    candidates = ["official_binding_score", "binding_score", "affinity_kcal_mol"]
+    for column in candidates:
+        if any(finite(row.get(column)) for row in rows):
+            return column
+    return "official_binding_score"
+
+
+def resolve_score_direction(column: str, requested_direction: str) -> str:
+    if requested_direction != "auto":
+        return requested_direction
+    lower_is_better = {
+        "affinity_kcal_mol",
+        "inner_rmsd",
+        "analysis_penalty",
+    }
+    if column in lower_is_better or column.endswith("_rmsd"):
+        return "lower-is-better"
+    return "higher-is-better"
+
+
+def default_score_label(column: str, direction: str) -> str:
+    if column == "official_binding_score":
+        return "official binding score"
+    if column == "affinity_kcal_mol":
+        return "PLE docking analysis score"
+    suffix = "lower is better" if direction == "lower-is-better" else "higher is better"
+    return f"{column.replace('_', ' ')} ({suffix})"
+
+
+def annotate_teacher_scores(rows: list[dict[str, str]], args: argparse.Namespace) -> dict[str, object]:
+    column = resolve_score_column(rows, args.score_column)
+    direction = resolve_score_direction(column, args.score_direction)
+    label = args.score_label or default_score_label(column, direction)
+    for row in rows:
+        raw_score = safe_float(row.get(column))
+        if math.isnan(raw_score):
+            continue
+        analysis_score = -raw_score if direction == "lower-is-better" else raw_score
+        row["analysis_score"] = f"{analysis_score:.8g}"
+        row["analysis_raw_score"] = f"{raw_score:.8g}"
+        row["analysis_score_source"] = column
+        row["official_binding_score"] = f"{analysis_score:.8g}"
+    return {
+        "score_column": column,
+        "score_direction": direction,
+        "score_label": label,
+        "score_transform": "negated" if direction == "lower-is-better" else "identity",
+        "score_note": (
+            "Lower-is-better source values are negated before model fitting so larger teacher scores are always better."
+            if direction == "lower-is-better"
+            else "Teacher scores are used directly; larger values are treated as better."
+        ),
+    }
+
+
 def build_rows(args: argparse.Namespace) -> list[dict[str, object]]:
     history_csv = args.history_csv.expanduser()
     history_rows = read_csv(history_csv)
     if args.analysis_csv:
         merge_analysis_scores(history_rows, read_csv(args.analysis_csv.expanduser()))
+    args._score_metadata = annotate_teacher_scores(history_rows, args)
     reference_fps = load_reference_scaffold_fps(args.reference_smiles_csv, args.max_reference_rows)
     receptor = args.receptor.expanduser() if args.receptor else None
     receptor_atoms = read_pdbqt_atoms(receptor) if receptor else []
@@ -585,6 +644,9 @@ def build_rows(args: argparse.Namespace) -> list[dict[str, object]]:
         record.update(smiles_sanity(smiles))
         record["canonical_smiles"] = smiles
         record["official_binding_score"] = safe_float(row.get("official_binding_score"))
+        record["analysis_score"] = safe_float(row.get("analysis_score"))
+        record["analysis_raw_score"] = safe_float(row.get("analysis_raw_score"))
+        record["analysis_score_source"] = row.get("analysis_score_source", "")
         record["chembl_scaffold_similarity"] = max_scaffold_similarity(smiles, reference_fps)
         if receptor_atoms:
             pose_path = resolve_maybe_path(row.get("pose_path"), history_dir)
@@ -601,9 +663,13 @@ def build_rows(args: argparse.Namespace) -> list[dict[str, object]]:
 def pca_coords(matrix: np.ndarray) -> np.ndarray:
     if len(matrix) == 0:
         return np.empty((0, 2))
-    if len(matrix) == 1:
+    if len(matrix) == 1 or matrix.shape[1] == 0:
         return np.zeros((1, 2))
-    return PCA(n_components=2, random_state=13).fit_transform(matrix)
+    n_components = min(2, matrix.shape[0], matrix.shape[1])
+    xy = PCA(n_components=n_components, random_state=13).fit_transform(matrix)
+    if n_components == 1:
+        xy = np.column_stack([xy[:, 0], np.zeros(len(xy))])
+    return xy
 
 
 def cosine_embedding_coords(matrix: np.ndarray, seed: int = 13) -> tuple[np.ndarray, str]:
@@ -628,6 +694,13 @@ def cosine_embedding_coords(matrix: np.ndarray, seed: int = 13) -> tuple[np.ndar
 
 
 def add_spaces(rows: list[dict[str, object]], args: argparse.Namespace) -> dict[str, object]:
+    if not rows:
+        return {
+            "pure_smiles_space_method": "empty",
+            "pure_smiles_space_note": "No molecules available for embedding.",
+            "structural_space_method": "empty",
+            "structural_space_features": [],
+        }
     smiles_matrix = np.vstack([morgan_vector(str(row["canonical_smiles"])) for row in rows])
     smiles_xy = pca_coords(smiles_matrix)
     cosine_xy, cosine_method = cosine_embedding_coords(smiles_matrix, args.seed)
@@ -636,7 +709,11 @@ def add_spaces(rows: list[dict[str, object]], args: argparse.Namespace) -> dict[
         if any(not math.isnan(safe_float(row.get(field))) for row in rows)
     ]
     structural_matrix = np.array([[safe_float(row.get(field)) for field in structural_fields] for row in rows], dtype=float)
-    structural_xy = make_pipeline(SimpleImputer(strategy="median"), StandardScaler(), PCA(n_components=2, random_state=13)).fit_transform(structural_matrix)
+    if structural_fields:
+        structural_scaled = make_pipeline(SimpleImputer(strategy="median"), StandardScaler()).fit_transform(structural_matrix)
+        structural_xy = pca_coords(structural_scaled)
+    else:
+        structural_xy = np.zeros((len(rows), 2))
     for row, xy1, xy_cos, xy2 in zip(rows, smiles_xy, cosine_xy, structural_xy):
         row["pure_smiles_pc1"] = round(float(xy1[0]), 6)
         row["pure_smiles_pc2"] = round(float(xy1[1]), 6)
@@ -653,9 +730,53 @@ def add_spaces(rows: list[dict[str, object]], args: argparse.Namespace) -> dict[
 
 
 def train_predict(rows: list[dict[str, object]], args: argparse.Namespace) -> dict[str, object]:
+    if args.analysis_mode == "unsupervised":
+        for row in rows:
+            row["predicted_binding_score"] = ""
+            row["prediction_residual"] = ""
+            row["score_set"] = "space"
+        affinity_values = sorted(value for value in non_nan_values(rows, "affinity_kcal_mol"))
+        if len(affinity_values) >= 5:
+            n = len(affinity_values)
+            score_bins = [round(affinity_values[int(n * p)], 4) for p in [0.2, 0.4, 0.6, 0.8]]
+        else:
+            score_bins = [-10.0, -8.0, -6.0, -4.0]
+        return {
+            "analysis_mode": "unsupervised",
+            "space_rows": len(rows),
+            "scored_rows": 0,
+            "train_rows": 0,
+            "test_rows": 0,
+            "feature_fields": [],
+            "score_bins": score_bins,
+            "cv_r2_mean": "",
+            "cv_r2_std": "",
+            "cv_mae_mean": "",
+            "cv_mae_std": "",
+            "model_interpretation": "unsupervised_space_only",
+            "prediction_warning": "No supervised binding-score model was trained. Use this dashboard for clustering, dimensionality reduction, docking affinity, CNN pose score, and pose/contact triage.",
+        }
     scored = [row for row in rows if not math.isnan(safe_float(row.get("official_binding_score")))]
     rng = random.Random(args.seed)
     rng.shuffle(scored)
+    if len(scored) < 2:
+        for row in rows:
+            row["predicted_binding_score"] = ""
+            row["score_set"] = "train" if row in scored else "unscored"
+        valid_scores = sorted([safe_float(r.get("official_binding_score")) for r in scored if finite(r.get("official_binding_score"))])
+        return {
+            "scored_rows": len(scored),
+            "train_rows": len(scored),
+            "test_rows": 0,
+            "feature_fields": [],
+            "score_bins": valid_scores or [0.30, 0.35, 0.38, 0.40],
+            "cv_r2_mean": "",
+            "cv_r2_std": "",
+            "cv_mae_mean": "",
+            "cv_mae_std": "",
+            "model_interpretation": "not_enough_scored_rows",
+            "prediction_warning": "At least two scored rows are needed before the random-forest diagnostic model can run.",
+        }
     train_n = min(args.train_size, max(1, len(scored) - args.test_size))
     test_n = min(args.test_size, max(0, len(scored) - train_n))
     train_rows = scored[:train_n]
@@ -665,6 +786,23 @@ def train_predict(rows: list[dict[str, object]], args: argparse.Namespace) -> di
         field for field in STRUCTURAL_FEATURES
         if any(not math.isnan(safe_float(row.get(field))) for row in train_rows)
     ]
+    if not feature_fields:
+        for row in rows:
+            row["predicted_binding_score"] = ""
+            row["score_set"] = "train" if row in train_rows else ("test" if row in test_rows else "unscored")
+        return {
+            "scored_rows": len(scored),
+            "train_rows": len(train_rows),
+            "test_rows": len(test_rows),
+            "feature_fields": [],
+            "score_bins": [0.30, 0.35, 0.38, 0.40],
+            "cv_r2_mean": "",
+            "cv_r2_std": "",
+            "cv_mae_mean": "",
+            "cv_mae_std": "",
+            "model_interpretation": "not_enough_feature_signal",
+            "prediction_warning": "No finite structural or descriptor features were available for model fitting.",
+        }
     x_train = np.array([[safe_float(row.get(field)) for field in feature_fields] for row in train_rows], dtype=float)
     y_train = np.array([safe_float(row.get("official_binding_score")) for row in train_rows], dtype=float)
     model = make_pipeline(
@@ -672,10 +810,13 @@ def train_predict(rows: list[dict[str, object]], args: argparse.Namespace) -> di
         RandomForestRegressor(n_estimators=args.trees, random_state=args.seed, min_samples_leaf=5),
     )
     model.fit(x_train, y_train)
-    # 5-fold CV on training set
-    cv = KFold(n_splits=5, shuffle=True, random_state=args.seed)
-    cv_r2 = cross_val_score(model, x_train, y_train, cv=cv, scoring="r2")
-    cv_mae = -cross_val_score(model, x_train, y_train, cv=cv, scoring="neg_mean_absolute_error")
+    cv_r2 = np.array([], dtype=float)
+    cv_mae = np.array([], dtype=float)
+    if len(train_rows) >= 2:
+        n_splits = min(5, len(train_rows))
+        cv = KFold(n_splits=n_splits, shuffle=True, random_state=args.seed)
+        cv_r2 = cross_val_score(model, x_train, y_train, cv=cv, scoring="r2")
+        cv_mae = -cross_val_score(model, x_train, y_train, cv=cv, scoring="neg_mean_absolute_error")
     x_all = np.array([[safe_float(row.get(field)) for field in feature_fields] for row in rows], dtype=float)
     preds = model.predict(x_all)
     for row, pred in zip(rows, preds):
@@ -699,10 +840,10 @@ def train_predict(rows: list[dict[str, object]], args: argparse.Namespace) -> di
         "test_rows": len(test_rows),
         "feature_fields": feature_fields,
         "score_bins": score_bins,
-        "cv_r2_mean": round(float(np.mean(cv_r2)), 6),
-        "cv_r2_std": round(float(np.std(cv_r2)), 6),
-        "cv_mae_mean": round(float(np.mean(cv_mae)), 6),
-        "cv_mae_std": round(float(np.std(cv_mae)), 6),
+        "cv_r2_mean": round(float(np.nanmean(cv_r2)), 6) if len(cv_r2) else "",
+        "cv_r2_std": round(float(np.nanstd(cv_r2)), 6) if len(cv_r2) else "",
+        "cv_mae_mean": round(float(np.nanmean(cv_mae)), 6) if len(cv_mae) else "",
+        "cv_mae_std": round(float(np.nanstd(cv_mae)), 6) if len(cv_mae) else "",
     }
     if test_rows:
         x_test = np.array([[safe_float(row.get(field)) for field in feature_fields] for row in test_rows], dtype=float)
@@ -762,7 +903,7 @@ def train_predict(rows: list[dict[str, object]], args: argparse.Namespace) -> di
     metrics["prediction_warning"] = (
         "Do not treat predicted_binding_score as authoritative when test_r2 or cv_r2 is low. "
         "Use the dashboard to inspect chemical space, pocket-contact space, QED/descriptors, "
-        "ChEMBL scaffold similarity, and official-score neighborhoods."
+        "ChEMBL scaffold similarity, and teacher-score neighborhoods."
     )
     return metrics
 
@@ -819,10 +960,9 @@ def penalty_hypotheses(row_a: dict[str, object], row_b: dict[str, object]) -> tu
         evidence.append(f"vdw_delta_low_minus_high={vdw_delta:.1f}")
 
     inner_delta = descriptor_delta(high, low, "inner_rmsd")
-    whole_delta = descriptor_delta(high, low, "whole_rmsd")
-    if (not math.isnan(inner_delta) and inner_delta >= 1.5) or (not math.isnan(whole_delta) and whole_delta >= 1.5):
+    if not math.isnan(inner_delta) and inner_delta >= 1.5:
         reasons.append("less_consistent_pose_family")
-        evidence.append(f"inner_rmsd_delta={inner_delta:.2f};whole_rmsd_delta={whole_delta:.2f}")
+        evidence.append(f"inner_rmsd_delta={inner_delta:.2f}")
 
     tpsa_delta = descriptor_delta(high, low, "tpsa")
     logp_delta = descriptor_delta(high, low, "logp")
@@ -943,7 +1083,7 @@ def compare_high_low_groups(rows: list[dict[str, object]], args: argparse.Namesp
         field for field in [
             "affinity_kcal_mol",
             "inner_rmsd",
-            "whole_rmsd",
+            "cnn_pose_score",
             "hbond_count",
             "hydrophobic_count",
             "pi_contact_count",
@@ -1140,6 +1280,10 @@ def main() -> None:
     parser.add_argument("--train-size", type=int, default=60)
     parser.add_argument("--test-size", type=int, default=20)
     parser.add_argument("--trees", type=int, default=400)
+    parser.add_argument("--analysis-mode", choices=["unsupervised", "supervised"], default="supervised", help="Use unsupervised for PLE clustering/dimensionality dashboards without fitting a binding-score model")
+    parser.add_argument("--score-column", default="auto", help="Teacher signal column; use affinity_kcal_mol for PLE docking-analysis dashboards")
+    parser.add_argument("--score-direction", choices=["auto", "higher-is-better", "lower-is-better"], default="auto")
+    parser.add_argument("--score-label", default="", help="Human label for the teacher signal shown in downstream dashboards")
     parser.add_argument("--max-reference-rows", type=int, default=5000)
     parser.add_argument("--shap-sample-size", type=int, default=80, help="Rows sampled from the training set for optional SHAP TreeExplainer output")
     parser.add_argument("--require-shap", action="store_true", help="Fail if SHAP is not installed or cannot explain the trained model")
@@ -1160,6 +1304,7 @@ def main() -> None:
     space_metrics = add_spaces(rows, args)
     metrics = train_predict(rows, args)
     metrics.update(space_metrics)
+    metrics.update(getattr(args, "_score_metadata", {}))
     metrics["pocket_embedding"] = {
         "receptor": str(args.receptor.expanduser()) if args.receptor else "",
         "cutoff_angstrom": args.pocket_embedding_cutoff,
@@ -1170,7 +1315,7 @@ def main() -> None:
     outdir = args.outdir.expanduser().resolve()
     fields = [
         "seq_id", "nickname", "score_set", "official_binding_score", "predicted_binding_score",
-        "prediction_residual",
+        "analysis_score", "analysis_raw_score", "analysis_score_source", "prediction_residual",
         "canonical_smiles", "smiles_sanity_status", "smiles_sanity_reasons", "murcko_scaffold", "chembl_scaffold_similarity",
         "pure_smiles_cosine1", "pure_smiles_cosine2", "pure_smiles_pc1", "pure_smiles_pc2",
         "structural_interaction_pc1", "structural_interaction_pc2",
@@ -1180,43 +1325,50 @@ def main() -> None:
     shap_rows = metrics.get("shap_mean_abs")
     if isinstance(shap_rows, list) and shap_rows:
         write_csv(outdir / "shap_feature_importance.csv", shap_rows, ["feature", "mean_abs_shap"])
-    cliff_rows = activity_cliff_report(rows, args)
-    cliff_fields = [
-        "seq_id_a", "seq_id_b", "higher_score_seq_id", "lower_score_seq_id",
-        "official_score_a", "official_score_b", "official_score_delta",
-        "affinity_a", "affinity_b", "affinity_delta", "vina_direction",
-        "morgan_tanimoto", "mcs_atoms", "mcs_bonds", "mcs_fraction_min", "mcs_fraction_max",
-        "pure_smiles_distance", "structural_interaction_distance",
-        "penalty_hypotheses", "evidence", "smiles_a", "smiles_b",
-    ]
-    write_csv(outdir / "activity_cliff_report.csv", cliff_rows, cliff_fields)
-    metrics["activity_cliff_rows"] = len(cliff_rows)
-    metrics["activity_cliff_note"] = (
-        "Rule-based hypotheses only. Use these pairs to inspect pose families, local contacts, "
-        "conformational/desolvation penalties, or assay-specific effects."
-    )
-    group_compare_rows, group_summary, group_members = compare_high_low_groups(rows, args)
-    group_fields = [
-        "feature", "high_mean", "low_mean", "delta_high_minus_low", "abs_delta",
-        "high_std", "low_std", "effect_size_approx", "high_non_nan", "low_non_nan",
-    ]
-    write_csv(outdir / "high_low_group_feature_comparison.csv", group_compare_rows, group_fields)
-    write_csv(
-        outdir / "high_low_group_members.csv",
-        group_members,
-        [
-            "group", "seq_id", "nickname", "official_binding_score", "predicted_binding_score",
-            "affinity_kcal_mol", "pure_smiles_cosine1", "pure_smiles_cosine2",
-            "structural_interaction_pc1", "structural_interaction_pc2", "canonical_smiles",
-        ],
-    )
-    with (outdir / "high_low_group_summary.json").open("w", encoding="utf-8") as handle:
-        json.dump(group_summary, handle, indent=2)
-    metrics["high_low_group_summary"] = {
-        "high_count": group_summary.get("high_count", 0),
-        "low_count": group_summary.get("low_count", 0),
-        "embedding_center_distance_4d": group_summary.get("embedding_center_distance_4d", ""),
-    }
+    cliff_rows: list[dict[str, object]] = []
+    group_summary: dict[str, object] = {"high_count": 0, "low_count": 0}
+    if args.analysis_mode != "unsupervised":
+        cliff_rows = activity_cliff_report(rows, args)
+        cliff_fields = [
+            "seq_id_a", "seq_id_b", "higher_score_seq_id", "lower_score_seq_id",
+            "official_score_a", "official_score_b", "official_score_delta",
+            "affinity_a", "affinity_b", "affinity_delta", "vina_direction",
+            "morgan_tanimoto", "mcs_atoms", "mcs_bonds", "mcs_fraction_min", "mcs_fraction_max",
+            "pure_smiles_distance", "structural_interaction_distance",
+            "penalty_hypotheses", "evidence", "smiles_a", "smiles_b",
+        ]
+        write_csv(outdir / "activity_cliff_report.csv", cliff_rows, cliff_fields)
+        metrics["activity_cliff_rows"] = len(cliff_rows)
+        metrics["activity_cliff_note"] = (
+            "Rule-based hypotheses only. Use these pairs to inspect pose families, local contacts, "
+            "conformational/desolvation penalties, or assay-specific effects."
+        )
+        group_compare_rows, group_summary, group_members = compare_high_low_groups(rows, args)
+        group_fields = [
+            "feature", "high_mean", "low_mean", "delta_high_minus_low", "abs_delta",
+            "high_std", "low_std", "effect_size_approx", "high_non_nan", "low_non_nan",
+        ]
+        write_csv(outdir / "high_low_group_feature_comparison.csv", group_compare_rows, group_fields)
+        write_csv(
+            outdir / "high_low_group_members.csv",
+            group_members,
+            [
+                "group", "seq_id", "nickname", "official_binding_score", "predicted_binding_score",
+                "affinity_kcal_mol", "pure_smiles_cosine1", "pure_smiles_cosine2",
+                "structural_interaction_pc1", "structural_interaction_pc2", "canonical_smiles",
+            ],
+        )
+        with (outdir / "high_low_group_summary.json").open("w", encoding="utf-8") as handle:
+            json.dump(group_summary, handle, indent=2)
+        metrics["high_low_group_summary"] = {
+            "high_count": group_summary.get("high_count", 0),
+            "low_count": group_summary.get("low_count", 0),
+            "embedding_center_distance_4d": group_summary.get("embedding_center_distance_4d", ""),
+        }
+    else:
+        metrics["activity_cliff_rows"] = 0
+        metrics["activity_cliff_note"] = "Skipped in unsupervised mode."
+        metrics["high_low_group_summary"] = {"high_count": 0, "low_count": 0, "embedding_center_distance_4d": ""}
     with (outdir / "binding_score_model_metrics.json").open("w", encoding="utf-8") as handle:
         json.dump(metrics, handle, indent=2)
     score_bins = metrics.get("score_bins")

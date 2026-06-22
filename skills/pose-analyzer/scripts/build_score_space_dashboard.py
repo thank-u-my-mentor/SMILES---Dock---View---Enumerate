@@ -38,6 +38,8 @@ def safe_float(value: object) -> float:
 def compact_row(row: dict[str, str]) -> dict[str, object]:
     numeric_fields = [
         "official_binding_score",
+        "analysis_score",
+        "analysis_raw_score",
         "predicted_binding_score",
         "chembl_scaffold_similarity",
         "pure_smiles_cosine1",
@@ -48,7 +50,7 @@ def compact_row(row: dict[str, str]) -> dict[str, object]:
         "structural_interaction_pc2",
         "affinity_kcal_mol",
         "inner_rmsd",
-        "whole_rmsd",
+        "cnn_pose_score",
         "hbond_count",
         "hydrophobic_count",
         "vdw_contact_count",
@@ -91,6 +93,7 @@ def compact_row(row: dict[str, str]) -> dict[str, object]:
         "smiles_sanity_status": row.get("smiles_sanity_status", ""),
         "smiles_sanity_reasons": row.get("smiles_sanity_reasons", ""),
         "murcko_scaffold": row.get("murcko_scaffold", ""),
+        "analysis_score_source": row.get("analysis_score_source", ""),
     }
     for field in ("selection_reason", "selection_origin"):
         if field in row:
@@ -109,13 +112,13 @@ def build_html() -> str:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Molecule Score Space Dashboard</title>
+  <title>Molecule Space Dashboard</title>
   <link rel="stylesheet" href="static/style.css" />
 </head>
 <body>
   <header>
-    <h1>Molecule Score Space Dashboard</h1>
-    <div class="subtle">Pure-SMILES-space + structural-interaction-space. Official binding score is the teacher signal; prediction is diagnostic only when model quality is weak.</div>
+    <h1>Molecule Space Dashboard</h1>
+    <div class="subtle" id="dashboard-subtitle">Pure-SMILES-space + structural-interaction-space for clustering, dimensionality reduction, and docking-pose triage.</div>
   </header>
 
   <main>
@@ -126,8 +129,8 @@ def build_html() -> str:
         <div id="model-warning" class="warning">Loading model diagnostics...</div>
       </div>
       <div>
-        <h2>Predicted vs Official</h2>
-        <svg id="quality-plot" viewBox="0 0 420 260" aria-label="predicted versus official score"></svg>
+        <h2 id="quality-title">Predicted vs Teacher</h2>
+        <svg id="quality-plot" viewBox="0 0 420 260" aria-label="predicted versus teacher score"></svg>
       </div>
       <div>
         <h2>Feature Importance</h2>
@@ -145,10 +148,11 @@ def build_html() -> str:
       </label>
       <label>Color
         <select id="color-select">
-          <option value="official_binding_score">official binding score</option>
+          <option value="affinity_kcal_mol">GNINA/Vina affinity</option>
+          <option value="cnn_pose_score">CNN pose score</option>
+          <option value="official_binding_score">triage score</option>
           <option value="chembl_scaffold_similarity">ChEMBL scaffold similarity</option>
           <option value="qed">QED</option>
-          <option value="affinity_kcal_mol">Vina affinity</option>
           <option value="mw">MW</option>
           <option value="predicted_binding_score">predicted score (experimental)</option>
         </select>
@@ -187,18 +191,19 @@ def build_html() -> str:
 
     <section class="summary">
       <h2>Human Triage Table</h2>
-      <div class="subtle">Sorted by official binding score when present, otherwise by ChEMBL scaffold similarity, QED, and docking context. Predicted score is kept as experimental context only.</div>
+      <div class="subtle" id="table-note">Sorted by teacher score when present, otherwise by ChEMBL scaffold similarity, QED, and docking context. Predicted score is diagnostic context only.</div>
       <table id="candidate-table">
         <thead>
           <tr>
             <th>seq_id</th>
-            <th>official</th>
+            <th id="teacher-th">teacher</th>
             <th>pred.</th>
             <th>resid.</th>
             <th>QED</th>
             <th>MW</th>
             <th>ChEMBL scaffold</th>
             <th>affinity</th>
+            <th>CNN pose</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -393,6 +398,12 @@ const tableBody = document.querySelector("#candidate-table tbody");
 
 function num(v) { return typeof v === "number" && Number.isFinite(v); }
 function fmt(v, n=3) { return num(v) ? v.toFixed(n) : ""; }
+function teacherLabel() { return (METRICS && METRICS.score_label) || "official binding score"; }
+function unsupervisedMode() { return (METRICS && METRICS.analysis_mode) === "unsupervised"; }
+function teacherShortLabel() {
+  const label = teacherLabel();
+  return label.length > 22 ? "teacher" : label;
+}
 function officialRecommendationIds() {
   return (ACTIVE.official_score_seq_ids || []).slice(0, 3);
 }
@@ -463,9 +474,10 @@ function legendFor(field) {
   const title = {
     chembl_scaffold_similarity: "ChEMBL scaffold similarity",
     qed: "QED",
-    official_binding_score: "official binding score",
+    official_binding_score: teacherLabel(),
+    cnn_pose_score: "CNN pose score",
     predicted_binding_score: "predicted score (experimental)",
-    affinity_kcal_mol: "Vina affinity (kcal/mol)"
+    affinity_kcal_mol: "GNINA/Vina affinity (kcal/mol)"
   }[field] || field;
   const range = colorRange(field);
   const u = userColorRange[field];
@@ -557,7 +569,7 @@ function draw() {
   function sy(y) { return H - P - ((y - minY) / ((maxY - minY) || 1)) * (H - 2*P) * view.scale + view.dy; }
   svg.innerHTML = `<rect x="0" y="0" width="${W}" height="${H}" fill="#fff"/>
     <text x="${P}" y="24" class="axis-label">${document.getElementById("space-select").selectedOptions[0].text}</text>
-    <text x="${P + 250}" y="24" class="axis-label">gold outer ring = top official-score picks (default <=3); teal ring = frontier seed</text>`;
+    <text x="${P + 250}" y="24" class="axis-label">gold outer ring = top teacher-score picks (default <=3); teal ring = frontier seed</text>`;
   for (const [row, x, y] of points) {
     const scored = num(row.official_binding_score);
     const r = scored ? 6 : 3.2;
@@ -582,7 +594,7 @@ function draw() {
     circle.classList.add("point");
     circle.addEventListener("click", () => selectRow(row.seq_id));
     const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-    title.textContent = `${row.seq_id} official=${fmt(row.official_binding_score)} pred=${fmt(row.predicted_binding_score)} QED=${fmt(row.qed)} MW=${fmt(row.mw)} ${row.canonical_smiles}`;
+    title.textContent = `${row.seq_id} teacher=${fmt(row.official_binding_score)} pred=${fmt(row.predicted_binding_score)} QED=${fmt(row.qed)} MW=${fmt(row.mw)} ${row.canonical_smiles}`;
     circle.appendChild(title);
     svg.appendChild(circle);
   }
@@ -590,14 +602,21 @@ function draw() {
 }
 
 function renderDiagnostics() {
+  const label = teacherLabel();
+  document.getElementById("dashboard-subtitle").textContent = unsupervisedMode()
+    ? "Pure-SMILES-space + structural-interaction-space for clustering, dimensionality reduction, affinity, CNN pose score, and contact triage."
+    : "Pure-SMILES-space + structural-interaction-space. The selected teacher signal drives model diagnostics; prediction is diagnostic only when model quality is weak.";
+  document.getElementById("quality-title").textContent = unsupervisedMode() ? "Affinity vs CNN Pose" : `Predicted vs ${teacherShortLabel()}`;
+  document.getElementById("teacher-th").textContent = teacherShortLabel();
+  document.getElementById("table-note").textContent = `Sorted by ${label} when present, otherwise by ChEMBL scaffold similarity, QED, and docking context. Predicted score is diagnostic context only.`;
   const cards = document.getElementById("metric-cards");
   const warning = document.getElementById("model-warning");
   const r2 = METRICS.test_r2;
   const mae = METRICS.test_mae;
   const cardData = [
-    ["scored", METRICS.scored_rows],
-    ["train", METRICS.train_rows],
-    ["test", METRICS.test_rows],
+    [unsupervisedMode() ? "rows" : "scored", unsupervisedMode() ? METRICS.space_rows : METRICS.scored_rows],
+    ["train", unsupervisedMode() ? "" : METRICS.train_rows],
+    ["test", unsupervisedMode() ? "" : METRICS.test_rows],
     ["test R^2", num(r2) ? r2.toFixed(3) : ""],
     ["test MAE", num(mae) ? mae.toFixed(4) : ""],
     ["CV R^2", num(METRICS.cv_r2_mean) ? `${METRICS.cv_r2_mean.toFixed(3)} +/- ${(METRICS.cv_r2_std || 0).toFixed(3)}` : ""],
@@ -607,7 +626,9 @@ function renderDiagnostics() {
   cards.innerHTML = cardData.map(([label, value]) => `<div class="metric-card"><div class="label">${label}</div><div class="value">${value ?? ""}</div></div>`).join("");
   const poor = !num(r2) || r2 < 0.3 || !num(METRICS.cv_r2_mean) || METRICS.cv_r2_mean < 0.3;
   warning.className = poor ? "warning" : "warning good";
-  warning.textContent = poor
+  warning.textContent = unsupervisedMode()
+    ? "No supervised binding-score model was trained. Use the point clouds, affinity, CNN pose score, inner RMSD, contacts, and descriptors as clustering/triage signals."
+    : poor
     ? `Prediction is not reliable here. R^2=${num(r2) ? r2.toFixed(3) : "NA"} means this model should be treated as a failure diagnostic, not a binding-score predictor.`
     : `Prediction has a usable screening signal, but still needs external validation. R^2=${r2.toFixed(3)}.`;
   drawQualityPlot();
@@ -615,24 +636,28 @@ function renderDiagnostics() {
 }
 
 function drawQualityPlot() {
-  const rows = DATA.filter(r => num(r.official_binding_score) && num(r.predicted_binding_score));
+  const rows = unsupervisedMode()
+    ? DATA.filter(r => num(r.affinity_kcal_mol) && num(r.cnn_pose_score))
+    : DATA.filter(r => num(r.official_binding_score) && num(r.predicted_binding_score));
   const W = 420, H = 260, P = 38;
   qualitySvg.innerHTML = `<rect x="0" y="0" width="${W}" height="${H}" fill="#fff"/>`;
   if (!rows.length) {
-    qualitySvg.innerHTML += `<text x="${P}" y="${P}" class="axis-label">No scored predictions.</text>`;
+    qualitySvg.innerHTML += `<text x="${P}" y="${P}" class="axis-label">No paired affinity/CNN pose data.</text>`;
     return;
   }
-  const values = rows.flatMap(r => [r.official_binding_score, r.predicted_binding_score]);
+  const values = unsupervisedMode()
+    ? rows.flatMap(r => [r.cnn_pose_score, -r.affinity_kcal_mol])
+    : rows.flatMap(r => [r.official_binding_score, r.predicted_binding_score]);
   const minV = Math.min(...values), maxV = Math.max(...values);
   function s(v) { return P + ((v - minV) / ((maxV - minV) || 1)) * (W - 2 * P); }
   function y(v) { return H - P - ((v - minV) / ((maxV - minV) || 1)) * (H - 2 * P); }
   qualitySvg.innerHTML += `<line x1="${P}" y1="${H-P}" x2="${W-P}" y2="${P}" class="quality-axis"/>
-    <text x="${P}" y="${H-8}" class="axis-label">predicted</text>
-    <text x="6" y="${P}" class="axis-label">official</text>`;
+    <text x="${P}" y="${H-8}" class="axis-label">${unsupervisedMode() ? "CNN pose" : "predicted"}</text>
+    <text x="6" y="${P}" class="axis-label">${unsupervisedMode() ? "-affinity" : teacherShortLabel()}</text>`;
   for (const row of rows) {
     const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    c.setAttribute("cx", s(row.predicted_binding_score));
-    c.setAttribute("cy", y(row.official_binding_score));
+    c.setAttribute("cx", s(unsupervisedMode() ? row.cnn_pose_score : row.predicted_binding_score));
+    c.setAttribute("cy", y(unsupervisedMode() ? -row.affinity_kcal_mol : row.official_binding_score));
     c.setAttribute("r", row.score_set === "test" ? 5.5 : 3.8);
     c.setAttribute("fill", row.score_set === "test" ? "#d95f02" : "#547aa5");
     c.setAttribute("stroke", "#263445");
@@ -640,7 +665,9 @@ function drawQualityPlot() {
     c.classList.add("quality-point");
     c.addEventListener("click", () => selectRow(row.seq_id));
     const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-    title.textContent = `${row.seq_id} set=${row.score_set} official=${fmt(row.official_binding_score,4)} predicted=${fmt(row.predicted_binding_score,4)}`;
+    title.textContent = unsupervisedMode()
+      ? `${row.seq_id} affinity=${fmt(row.affinity_kcal_mol,3)} cnn_pose=${fmt(row.cnn_pose_score,4)}`
+      : `${row.seq_id} set=${row.score_set} teacher=${fmt(row.official_binding_score,4)} predicted=${fmt(row.predicted_binding_score,4)}`;
     c.appendChild(title);
     qualitySvg.appendChild(c);
   }
@@ -666,10 +693,10 @@ function selectRow(seqId) {
   if (!row) return;
   const active = activeInfo(seqId) || {};
   const keys = [
-    "seq_id", "nickname", "score_set", "official_binding_score", "predicted_binding_score",
+    "seq_id", "nickname", "score_set", "official_binding_score", "analysis_raw_score", "analysis_score_source", "predicted_binding_score",
     "prediction_residual", "chembl_scaffold_similarity", "qed", "mw", "logp", "tpsa", "rot_bonds",
-    "affinity_kcal_mol", "hbond_count", "hydrophobic_count", "pi_contact_count", "ch_pi_count",
-    "inner_rmsd", "whole_rmsd", "druglike_refinement_score",
+    "affinity_kcal_mol", "cnn_pose_score", "hbond_count", "hydrophobic_count", "pi_contact_count", "ch_pi_count",
+    "inner_rmsd", "druglike_refinement_score",
     "pocket_atom_count_5a", "pocket_residue_count_5a", "pocket_rg_5a", "pocket_span_5a",
     "pocket_centroid_distance_5a", "pocket_hydrophobic_fraction_5a", "pocket_polar_fraction_5a",
     "pocket_charged_fraction_5a", "pocket_aromatic_fraction_5a",
@@ -680,7 +707,7 @@ function selectRow(seqId) {
     "murcko_scaffold", "canonical_smiles"
   ];
   const merged = {...row, ...active};
-  const badge = isOfficialRecommendation(seqId) ? `<div class="warning good">Recommended for next official binding score cycle.</div>` : (isFrontierSeed(seqId) ? `<div class="warning good">Frontier seed for exploration/refinement.</div>` : "");
+  const badge = isOfficialRecommendation(seqId) ? `<div class="warning good">Top teacher-score pick for inspection.</div>` : (isFrontierSeed(seqId) ? `<div class="warning good">Frontier seed for exploration/refinement.</div>` : "");
   detail.innerHTML = badge + `<div class="detail-grid">` + keys.map(k => {
     const v = merged[k];
     return `<div class="key">${k}</div><div>${num(v) ? fmt(v, 4) : (v ?? "")}</div>`;
@@ -693,13 +720,19 @@ function drawTable(rows) {
     const ar = isOfficialRecommendation(a.seq_id) ? 1 : 0;
     const br = isOfficialRecommendation(b.seq_id) ? 1 : 0;
     if (br !== ar) return br - ar;
-    const ao = num(a.official_binding_score) ? a.official_binding_score : -1;
-    const bo = num(b.official_binding_score) ? b.official_binding_score : -1;
+    const ao = num(a.official_binding_score) ? a.official_binding_score : -Infinity;
+    const bo = num(b.official_binding_score) ? b.official_binding_score : -Infinity;
     if (bo !== ao) return bo - ao;
+    const aa = num(a.affinity_kcal_mol) ? a.affinity_kcal_mol : Infinity;
+    const ba = num(b.affinity_kcal_mol) ? b.affinity_kcal_mol : Infinity;
+    if (aa !== ba) return aa - ba;
+    const ac = num(a.cnn_pose_score) ? a.cnn_pose_score : -Infinity;
+    const bc = num(b.cnn_pose_score) ? b.cnn_pose_score : -Infinity;
+    if (bc !== ac) return bc - ac;
     return (b.chembl_scaffold_similarity || 0) - (a.chembl_scaffold_similarity || 0);
   }).slice(0, 80);
   tableBody.innerHTML = sorted.map(row => `<tr data-id="${row.seq_id}">
-    <td>${isOfficialRecommendation(row.seq_id) ? "[official] " : (isFrontierSeed(row.seq_id) ? "[frontier] " : "")}${row.seq_id}</td>
+    <td>${isOfficialRecommendation(row.seq_id) ? "[teacher] " : (isFrontierSeed(row.seq_id) ? "[frontier] " : "")}${row.seq_id}</td>
     <td>${fmt(row.official_binding_score)}</td>
     <td>${fmt(row.predicted_binding_score)}</td>
     <td>${num(row.official_binding_score) && num(row.predicted_binding_score) ? fmt(row.official_binding_score - row.predicted_binding_score) : ""}</td>
@@ -707,6 +740,7 @@ function drawTable(rows) {
     <td>${fmt(row.mw,1)}</td>
     <td>${fmt(row.chembl_scaffold_similarity)}</td>
     <td>${fmt(row.affinity_kcal_mol)}</td>
+    <td>${fmt(row.cnn_pose_score)}</td>
   </tr>`).join("");
   tableBody.querySelectorAll("tr").forEach(tr => tr.addEventListener("click", () => selectRow(tr.dataset.id)));
 }
@@ -761,8 +795,8 @@ Promise.all([
     const unscored = mapped.filter(r => !num(r.official_binding_score));
     ACTIVE.official_score_seq_ids = scored.slice(0, 3).concat(unscored).slice(0, 3).map(r => r.seq_id);
   } else {
-    // 若外部未提供 recommendations，自动取 DATA 中 official score 最高的 3 个
     const scored = DATA.filter(r => num(r.official_binding_score)).sort((a, b) => b.official_binding_score - a.official_binding_score);
+    // If no external recommendations exist, highlight the top teacher-score rows.
     ACTIVE.official_score_seq_ids = scored.slice(0, 3).map(r => r.seq_id);
   }
   // 同步 recommendations 对象数组
