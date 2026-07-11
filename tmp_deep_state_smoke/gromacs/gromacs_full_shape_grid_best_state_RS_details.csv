@@ -1,0 +1,2 @@
+state,frames,R_like_frames,S_like_frames,R_like_fraction,median_C4_O1_A,C4_O1_le_3A_fraction,engine,method,representation,min_cluster_size,min_samples,n_clusters,noise_fraction,coverage,weighted_abs_R_enrichment,max_abs_R_enrichment,purity,NMI,ARI,score,blocked_logistic_auc_on_PCA20
+-1,200,174,26,0.87,3.25339674949646,0.105,gromacs_full,shape_grid,PCA2,100,10,0,1.0,0.0,0.0,0.0,,0.0,0.0,0.0,0.8733781512605041

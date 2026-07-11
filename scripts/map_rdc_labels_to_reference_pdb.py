@@ -17,10 +17,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rdc-dir", required=True, type=Path)
     parser.add_argument("--reference-pdb", required=True, type=Path, help="PDB with the desired residue numbering")
     parser.add_argument("--gro", required=True, type=Path, help="GROMACS structure used by MDAnalysis/RDC")
+    parser.add_argument(
+        "--reference-chain",
+        help="Only use this chain from the reference PDB; useful when reference has A/B chains but MD used one chain.",
+    )
     return parser.parse_args()
 
 
-def reference_residues(path: Path) -> list[dict[str, object]]:
+def reference_residues(path: Path, reference_chain: str | None = None) -> list[dict[str, object]]:
     residues: list[dict[str, object]] = []
     seen: set[tuple[str, int, str]] = set()
     for line in path.read_text(errors="replace").splitlines():
@@ -31,6 +35,8 @@ def reference_residues(path: Path) -> list[dict[str, object]]:
             continue
         resname = line[17:20].strip()
         chain = line[21:22].strip() or "-"
+        if reference_chain and chain != reference_chain:
+            continue
         try:
             resid = int(line[22:26])
         except ValueError:
@@ -182,7 +188,7 @@ def map_timeseries(path: Path, mapping: dict[str, dict[str, object]]) -> None:
 
 def main() -> None:
     args = parse_args()
-    ref = reference_residues(args.reference_pdb)
+    ref = reference_residues(args.reference_pdb, args.reference_chain)
     md = gro_residues(args.gro)
     mapping = build_mapping(ref, md)
 
@@ -213,6 +219,7 @@ def main() -> None:
     metadata["residue_numbering"] = {
         "display": "reference_pdb",
         "reference_pdb": str(args.reference_pdb),
+        "reference_chain": args.reference_chain,
         "gro": str(args.gro),
         "map_csv": str(args.rdc_dir / "residue_numbering_map.csv"),
         "note": "RDC labels were mapped from GROMACS/Amber sequential residue ids back to the reference PDB chain/residue numbering.",

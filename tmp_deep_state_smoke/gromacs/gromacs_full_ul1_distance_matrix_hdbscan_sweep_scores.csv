@@ -1,0 +1,10 @@
+engine,method,representation,min_cluster_size,min_samples,n_clusters,noise_fraction,coverage,weighted_abs_R_enrichment,max_abs_R_enrichment,purity,NMI,ARI,score,blocked_logistic_auc_on_PCA20
+gromacs_full,ul1_distance_matrix,PCA2,100,10,0,1.0,0.0,0.0,0.0,,0.0,0.0,0.0,0.8640526556776557
+gromacs_full,ul1_distance_matrix,PCA2,100,30,0,1.0,0.0,0.0,0.0,,0.0,0.0,0.0,0.8640526556776557
+gromacs_full,ul1_distance_matrix,PCA2,100,80,0,1.0,0.0,0.0,0.0,,0.0,0.0,0.0,0.8640526556776557
+gromacs_full,ul1_distance_matrix,PCA10,100,10,0,1.0,0.0,0.0,0.0,,0.0,0.0,0.0,0.8640526556776557
+gromacs_full,ul1_distance_matrix,PCA10,100,30,0,1.0,0.0,0.0,0.0,,0.0,0.0,0.0,0.8640526556776557
+gromacs_full,ul1_distance_matrix,PCA10,100,80,0,1.0,0.0,0.0,0.0,,0.0,0.0,0.0,0.8640526556776557
+gromacs_full,ul1_distance_matrix,PCA20,100,10,0,1.0,0.0,0.0,0.0,,0.0,0.0,0.0,0.8640526556776557
+gromacs_full,ul1_distance_matrix,PCA20,100,30,0,1.0,0.0,0.0,0.0,,0.0,0.0,0.0,0.8640526556776557
+gromacs_full,ul1_distance_matrix,PCA20,100,80,0,1.0,0.0,0.0,0.0,,0.0,0.0,0.0,0.8640526556776557

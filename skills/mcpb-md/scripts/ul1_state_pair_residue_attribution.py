@@ -297,6 +297,7 @@ def ablation(feature_matrix: np.ndarray, cols: list[str], candidates: pd.DataFra
         remove = np.array([col.startswith(prefix) for col in cols], dtype=bool)
         if not np.any(remove):
             continue
+        only_auc = blocked_auc(feature_matrix[:, remove], y, frames, args.n_blocks)
         reduced_auc = blocked_auc(feature_matrix[:, ~remove], y, frames, args.n_blocks)
         rows.append(
             {
@@ -305,6 +306,8 @@ def ablation(feature_matrix: np.ndarray, cols: list[str], candidates: pd.DataFra
                 "reskey": str(row.reskey),
                 "removed_features": int(remove.sum()),
                 "full_blocked_auc": full_auc,
+                "only_residue_blocked_auc": only_auc,
+                "only_residue_auc_over_random": float(only_auc - 0.5) if np.isfinite(only_auc) else float("nan"),
                 "without_residue_blocked_auc": reduced_auc,
                 "ablation_auc_drop": float(full_auc - reduced_auc) if np.isfinite(full_auc) and np.isfinite(reduced_auc) else float("nan"),
             }
@@ -349,6 +352,7 @@ def plot_heatmap(df: pd.DataFrame, out: Path, top_n: int) -> None:
         "closest_r_cohen_d",
         "ring_centroid_xyz_delta_A",
         "ring_centroid_xyz_effect_norm",
+        "only_residue_blocked_auc",
         "ablation_auc_drop",
     ]
     available = [col for col in metrics if col in df.columns]
@@ -383,6 +387,9 @@ def plot_heatmap(df: pd.DataFrame, out: Path, top_n: int) -> None:
 def write_readme(out: Path, args: argparse.Namespace, selected: pd.DataFrame, attr: pd.DataFrame, abl: pd.DataFrame) -> None:
     top_attr = attr.head(8)[["reskey", "structural_score", "sc_xyz_delta_A", "closest_r_mean_delta_A"]].to_string(index=False)
     top_abl = abl.head(8)[["reskey", "ablation_auc_drop", "without_residue_blocked_auc"]].to_string(index=False)
+    top_single = abl.sort_values("only_residue_blocked_auc", ascending=False).head(8)[
+        ["reskey", "only_residue_blocked_auc", "only_residue_auc_over_random"]
+    ].to_string(index=False)
     text = f"""# UL1 State-Pair Residue Attribution
 
 Engine: `{args.engine}`
@@ -405,6 +412,9 @@ product-calibrated scalar triple product.
 effect, closest-heavy-atom distance effect, and aromatic ring-centroid effect.
 `ablation_auc_drop` asks how much a simple time-blocked linear classifier loses
 when all local-coordinate columns for one residue are removed.
+`only_residue_blocked_auc` asks how much state-pair information one residue
+carries by itself; this is often more interpretable than leave-one-out when
+the full feature set is redundant.
 
 ## Top Structural Contrasts
 
@@ -418,6 +428,12 @@ when all local-coordinate columns for one residue are removed.
 {top_abl}
 ```
 
+## Top Single-Residue AUC
+
+```text
+{top_single}
+```
+
 ## Main Files
 
 - `state_pair_residue_attribution.csv`
@@ -427,6 +443,7 @@ when all local-coordinate columns for one residue are removed.
 - `state_pair_top_residue_structural_score.png`
 - `state_pair_ablation_auc_drop.png`
 - `state_pair_feature_delta_heatmap.png`
+- `state_pair_single_residue_auc.png`
 """
     out.write_text(text, encoding="utf-8")
 
@@ -453,7 +470,16 @@ def main() -> int:
     attr = residue_attribution(feature_df, candidates, local_cols, args)
     abl = ablation(X_local, local_cols, candidates, feature_df, args)
     merged = attr.merge(
-        abl[["reskey", "full_blocked_auc", "without_residue_blocked_auc", "ablation_auc_drop"]],
+        abl[
+            [
+                "reskey",
+                "full_blocked_auc",
+                "only_residue_blocked_auc",
+                "only_residue_auc_over_random",
+                "without_residue_blocked_auc",
+                "ablation_auc_drop",
+            ]
+        ],
         on="reskey",
         how="left",
     )
@@ -483,6 +509,15 @@ def main() -> int:
         outdir / "state_pair_ablation_auc_drop.png",
         args.top_n,
         "#F58518",
+    )
+    plot_bar(
+        merged.sort_values("only_residue_blocked_auc", ascending=False),
+        "only_residue_blocked_auc",
+        "Single-Residue State Information",
+        "Blocked AUC using only this residue",
+        outdir / "state_pair_single_residue_auc.png",
+        args.top_n,
+        "#54A24B",
     )
     plot_heatmap(merged.sort_values("combined_interpretability_score", ascending=False), outdir / "state_pair_feature_delta_heatmap.png", args.top_n)
     write_readme(outdir / "README_state_pair_residue_attribution.md", args, selected, attr, abl)
