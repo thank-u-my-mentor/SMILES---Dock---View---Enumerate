@@ -10,6 +10,9 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from fix_fe_histidine_protonation import parse_pdb as parse_pdb_for_fe_his
+from fix_fe_histidine_protonation import repair_histidines
+
 
 DONOR_ELEMENTS = {"N", "O", "S"}
 
@@ -103,12 +106,43 @@ def donor_rows(atoms: list[Atom], metal: Atom, cutoff: float) -> list[tuple[floa
 def copy_required(src: Path, dst: Path) -> None:
     if not src.exists():
         raise FileNotFoundError(src)
+    if src.resolve() == dst.resolve():
+        return
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
 
 
+def write_text_lf(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+
+
+def write_fe_his_fixed_pdb(src: Path, dst: Path, *, cutoff: float, enabled: bool) -> Path:
+    if not enabled:
+        copy_required(src, dst)
+        return dst
+    lines, atoms = parse_pdb_for_fe_his(src)
+    output, report = repair_histidines(lines, atoms, metal_element="FE", cutoff=cutoff, add_backbone_h=True)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    write_text_lf(dst, "\n".join(output).rstrip() + "\n")
+    report_path = dst.with_suffix(dst.suffix + ".fe_his_repair.tsv")
+    with report_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["residue", "expected_resname", "metal", "donor", "donor_distance_A", "added_atoms", "removed_atoms", "status"],
+            delimiter="\t",
+        )
+        writer.writeheader()
+        writer.writerows(report)
+    if report:
+        print(f"fe_his_repair_report={report_path}")
+    return dst
+
+
 def write_fe_mol2(path: Path, charge: float) -> None:
-    path.write_text(
+    write_text_lf(
+        path,
         f"""@<TRIPOS>MOLECULE
 FE
     1     0     1     0     0
@@ -122,13 +156,11 @@ USER_CHARGES
 @<TRIPOS>SUBSTRUCTURE
      1 FE          1 TEMP              0 ****  ****    0 ROOT
 """,
-        encoding="utf-8",
-        newline="\n",
     )
 
 
 def write_hoh_mol2(path: Path) -> None:
-    path.write_text(HOH_MOL2, encoding="utf-8", newline="\n")
+    write_text_lf(path, HOH_MOL2)
 
 
 def write_mcpb_in(
@@ -144,7 +176,8 @@ def write_mcpb_in(
 ) -> None:
     frcmods = " ".join(f"{name}.frcmod" for name in ligand_names)
     mol2s = " ".join(f"{name}.mol2" for name in naa_names)
-    path.write_text(
+    write_text_lf(
+        path,
         f"""original_pdb mcpb_original.pdb
 group_name {group}
 cut_off {cutoff}
@@ -164,28 +197,40 @@ lgmodel_chg {charge}
 lgmodel_spin {mult}
 naa_mol2files {mol2s}
 """,
-        encoding="utf-8",
-        newline="\n",
     )
 
 
 def write_shell_scripts(mcpb_dir: Path, *, group: str, cores: int, session: str, gamess: str) -> None:
-    (mcpb_dir / "run_01_mcpb_step1.sh").write_text(
-        """#!/usr/bin/env bash
+    write_text_lf(
+        mcpb_dir / "run_01_mcpb_step1.sh",
+        f"""#!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")"
+cd "$(dirname "${{BASH_SOURCE[0]}}")"
 mkdir -p logs gamess_logs
 set +u
 source /mnt/l/WSL/conda_envs/AmberTools25/amber.sh
 set -u
 MCPB.py -i mcpb.in -s 1 | tee logs/mcpb_step1.log
+/mnt/l/WSL/softwares/conda_envs/md/bin/python /mnt/e/Codex/skills/pocket-ligand-explorer/scripts/build_mcpb_visual_check_pdb.py \
+  --small-pdb {group}_small.pdb \
+  --mol2-dir "$PWD" \
+  --out {group}_small_visual_check.pdb \
+  --report logs/{group}_small_visual_check_report.tsv \
+  --model-charge {charge} \
+  --mult {mult}
+/mnt/l/WSL/softwares/conda_envs/md/bin/python /mnt/e/Codex/skills/pocket-ligand-explorer/scripts/audit_mcpb_small_model_hydrogens.py \
+  --small-pdb {group}_small.pdb \
+  --mol2-dir "$PWD" \
+  --out logs/mcpb_small_model_hydrogen_audit.tsv \
+  --max-warnings "${{PLE_MCPB_H_WARNING_MAX:-2}}" \
+  --model-charge {charge} \
+  --mult {mult}
 """,
-        encoding="utf-8",
-        newline="\n",
     )
     (mcpb_dir / "run_01_mcpb_step1.sh").chmod(0o755)
 
-    (mcpb_dir / "run_02_prepare_gamess_inputs.sh").write_text(
+    write_text_lf(
+        mcpb_dir / "run_02_prepare_gamess_inputs.sh",
         f"""#!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "${{BASH_SOURCE[0]}}")"
@@ -196,12 +241,11 @@ cd "$(dirname "${{BASH_SOURCE[0]}}")"
   --cores {cores}
 echo prepared={group}_small_opt.inp
 """,
-        encoding="utf-8",
-        newline="\n",
     )
     (mcpb_dir / "run_02_prepare_gamess_inputs.sh").chmod(0o755)
 
-    (mcpb_dir / "run_03_small_opt_foreground.sh").write_text(
+    write_text_lf(
+        mcpb_dir / "run_03_small_opt_foreground.sh",
         f"""#!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "${{BASH_SOURCE[0]}}")"
@@ -224,12 +268,11 @@ else
 fi
 exit "$rc"
 """,
-        encoding="utf-8",
-        newline="\n",
     )
     (mcpb_dir / "run_03_small_opt_foreground.sh").chmod(0o755)
 
-    (mcpb_dir / "run_03_small_opt_tmux.sh").write_text(
+    write_text_lf(
+        mcpb_dir / "run_03_small_opt_tmux.sh",
         f"""#!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "${{BASH_SOURCE[0]}}")"
@@ -249,12 +292,11 @@ echo "tmux_session=$SESSION"
 echo "monitor=cd $PWD && bash monitor_small_opt.sh"
 echo "tail=tail -f $PWD/gamess_logs/${{JOB}}.log"
 """,
-        encoding="utf-8",
-        newline="\n",
     )
     (mcpb_dir / "run_03_small_opt_tmux.sh").chmod(0o755)
 
-    (mcpb_dir / "monitor_small_opt.sh").write_text(
+    write_text_lf(
+        mcpb_dir / "monitor_small_opt.sh",
         f"""#!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "${{BASH_SOURCE[0]}}")"
@@ -268,8 +310,6 @@ echo
 echo "===== search/energy markers ====="
 grep -E 'RUNTYP=|NSERCH:|TOTAL ENERGY|S-SQUARED|END OF GEOMETRY SEARCH|TERMINATED|ERROR|FAILURE' "gamess_logs/${{JOB}}.log" 2>/dev/null | tail -n 80 || true
 """,
-        encoding="utf-8",
-        newline="\n",
     )
     (mcpb_dir / "monitor_small_opt.sh").chmod(0o755)
 
@@ -279,7 +319,8 @@ def write_readme(outdir: Path, *, pdb: Path, group: str, metal: Atom, donors: li
         f"- {dist_value:.3f} A  {atom.resn} {atom.chain}{atom.resseq} {atom.name} serial={atom.serial}"
         for dist_value, atom in donors
     )
-    (outdir / "README.md").write_text(
+    write_text_lf(
+        outdir / "README.md",
         f"""# ZFY MCPB Small-Model Optimization
 
 This directory prepares the Hessian-before step for the hand-built 2R5V-derived
@@ -314,8 +355,6 @@ This run performs only the GAMESS geometry optimization of MCPB's small model.
 Do not launch Hessian until this log ends normally and the Fe-donor distances
 are inspected.
 """,
-        encoding="utf-8",
-        newline="\n",
     )
 
 
@@ -335,6 +374,11 @@ def main() -> int:
     parser.add_argument("--gamess", default="/home/qin/softwares/gamess/rungms")
     parser.add_argument("--fe-charge", type=float, default=3.0)
     parser.add_argument(
+        "--no-fix-fe-his",
+        action="store_true",
+        help="Do not auto-repair Fe-bound His tautomer hydrogens before MCPB step 1.",
+    )
+    parser.add_argument(
         "--ligand",
         action="append",
         nargs=3,
@@ -344,10 +388,6 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    _, atoms = parse_pdb(args.pdb)
-    metal = find_metal(atoms, chain=args.metal_chain, resseq=args.metal_resseq, atom_name=args.metal_atom)
-    donors = donor_rows(atoms, metal, args.cutoff)
-
     outdir = args.outdir
     mcpb_dir = outdir / "mcpb"
     input_dir = outdir / "input"
@@ -355,8 +395,18 @@ def main() -> int:
     input_dir.mkdir(parents=True, exist_ok=True)
     (outdir / "logs").mkdir(exist_ok=True)
 
+    fixed_pdb = write_fe_his_fixed_pdb(
+        args.pdb,
+        input_dir / "mcpb_original_fe_his_fixed.pdb",
+        cutoff=args.cutoff,
+        enabled=not args.no_fix_fe_his,
+    )
     copy_required(args.pdb, input_dir / args.pdb.name)
-    copy_required(args.pdb, mcpb_dir / "mcpb_original.pdb")
+    copy_required(fixed_pdb, mcpb_dir / "mcpb_original.pdb")
+
+    _, atoms = parse_pdb(fixed_pdb)
+    metal = find_metal(atoms, chain=args.metal_chain, resseq=args.metal_resseq, atom_name=args.metal_atom)
+    donors = donor_rows(atoms, metal, args.cutoff)
 
     ligand_names: list[str] = []
     for name, mol2, frcmod in args.ligand:

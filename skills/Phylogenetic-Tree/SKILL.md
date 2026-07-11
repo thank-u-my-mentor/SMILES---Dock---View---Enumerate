@@ -1,6 +1,6 @@
 ---
 name: Phylogenetic-Tree
-description: Build a general protein FASTA-to-homolog/SSN/phylogenetic-tree/iTOL workflow from curated seed FASTA or project CSVs, without assuming hydrolase biology. Use for HMMER/phmmer homolog retrieval, sequence QC, representative selection, tree construction, offline kingdom-level annotation from existing metadata, and post-tree manual SoluProt/NetSolP CSV import into iTOL annotation files. Defaults support /mnt/e/Tree-Metal-F and Metal-F fluorinated-ligand seed sets.
+description: Build a general protein FASTA-to-homolog/SSN/phylogenetic-tree/iTOL workflow from curated seed FASTA, project CSVs, or accession ID lists, without assuming hydrolase biology. Use for UniProt/NCBI ID-to-FASTA/PDB enzyme-library dashboards, identity heatmaps/matrices, HMMER/phmmer homolog retrieval, sequence QC, representative selection, tree construction, offline kingdom-level annotation from existing metadata, and post-tree manual SoluProt/NetSolP CSV import into iTOL annotation files. Defaults support /mnt/e/Tree-Metal-F and Metal-F fluorinated-ligand seed sets.
 ---
 
 # Phylogenetic-Tree
@@ -35,6 +35,61 @@ Kingdom annotations are a stable visual convention inherited from the Metal-F pr
 Default kingdom strip styling is `STRIP_WIDTH 25`, `MARGIN 5`, `BORDER_WIDTH 1`, `BORDER_COLOR #000000`. The scripts expose `--kingdom-strip-width`, `--kingdom-margin`, `--kingdom-border-width`, and `--kingdom-border-color` for small visual adjustments, but the defaults should remain Metal-F-compatible.
 
 When adding project-specific categorical strips such as EC class, enzyme subtype, or substrate class, do not reuse the kingdom visual language. Make those strips visually distinct from kingdom by default: narrower strip width, smaller margin, light or white border, and a high-contrast publication-style categorical palette. Avoid assigning adjacent warm hues to rare or conceptually similar categories, reserve neutral gray for `other`, and give compound labels such as `4.1.3.39/43` a visually distant hue from either parent category. iTOL color-strip datasets do not reliably support dashed borders, so prefer width, margin, and border contrast over unsupported dash-like options.
+
+## Identity Heatmap HTML Style
+
+For candidate identity matrices and enzyme-panel heatmaps, follow the HOA heatmap style established by the user's `HOA_2型醛缩酶热图.html` example unless the user explicitly asks for a different design. This is now the default visual grammar for `identity_matrix.html`, candidate comparison heatmaps, and dashboard heatmap tabs:
+
+- Use a quiet paper-like page: `body` background `#f6f6f2`, white panels, ink `#202326`, muted text `#687076`, line `#d8ddd6`, radius `8px`, and subtle shadow `0 12px 30px rgba(33,37,41,.08)`.
+- Use `Arial,"Microsoft YaHei",sans-serif`; keep letter spacing at `0`.
+- Put controls in a sticky top header: search box, order selector, label selector, identity-threshold selector, pair-mode selector, and precision selector when data are available.
+- Use a two-column layout on desktop: heatmap table at left and a `380px` right-side panel for `Selected Pair`, `Color Scale`, and top similar/distant pairs. Collapse to one column on narrow screens.
+- Heatmap cells should be compact and stable: `20px` square cells, sticky row labels, vertical sticky column labels, diagonal cells outlined, hover outline, and hidden cell text by default unless precision display is enabled.
+- Always use the full 0-100% identity color ramp, not an observed-range or 60-100% rescale:
+  - `0% #C94C4C`
+  - `25% #ECA76A`
+  - `50% #F2E7A6`
+  - `75% #9BCB9C`
+  - `90% #63B6C2`
+  - `100% #3F77B5`
+- Show color-scale ticks at exactly `0% / 25% / 50% / 75% / 90% / 100%`.
+- Compute cell colors by linear interpolation between those stops. Never map both low and mid-low identity to similar pinks; 10%, 60%, 80%, and 95% must be visually distinct.
+- Include pair detail fields when metadata are present: accession pair, identity, EC/subtype/source label, organisms, PDB, DOI, and free-text description.
+- Include top similar and most distant pair lists with mini bars colored by the same identity ramp.
+- Keep the heatmap self-contained in a single HTML file with embedded JSON data so it can be opened directly from disk.
+
+## Accession List Dashboard
+
+When the user has only UniProt accessions or NCBI protein accessions and wants a small enzyme library HTML, use `scripts/build_enzyme_library_dashboard.py`. It resolves FASTA from local CSV/FASTA first, optionally fetches missing UniProt/NCBI public records, pulls direct UniProt PDB cross-references, assigns nearest in-library PDB templates by pairwise identity, and writes a dashboard with overview, FASTA, and identity heatmap tabs.
+
+For expression-candidate dashboards modeled after the user's Metal-F, HOA, HpcH, aldolase, and VHPO workflows, the default dashboard content should include:
+
+- Protein FASTA for every selected candidate.
+- Source/original DNA FASTA when it is available from DOCX, GenBank/EMBL, UniProt cross-references, or local sidecar files.
+- A clearly labeled E. coli-optimized draft CDS for every protein when the user is preparing plasmid-ordering tables. If this is generated by a simple codon heuristic, label it as heuristic and advise supplier/manual review.
+- PDB IDs, DOI/PMID/literature notes, organism, kingdom/source group, construct decision, and expression caution notes when metadata exist.
+- Identity context for triage: nearest core sequence, nearest-core identity, closest selected neighbor, and closest-selected identity.
+- Links to the standalone `identity_matrix.html` and tree/iTOL files from the dashboard when practical.
+
+For a fluorinase/SAM halogenase candidate set:
+
+```bash
+python /mnt/e/Codex/skills/Phylogenetic-Tree/scripts/build_enzyme_library_dashboard.py build \
+  --ids "Q70GK9 W0W999 WP_014985135.1" \
+  --outdir /mnt/e/Tree-Metal-F/enzyme_library \
+  --title "Natural Fluorine Enzyme Library" \
+  --motifs "GTTDDS APNNGLL FADAG" \
+  --fetch
+```
+
+Run the fast structural check instead of browser-based QA unless layout debugging is needed:
+
+```bash
+python /mnt/e/Codex/skills/Phylogenetic-Tree/scripts/build_enzyme_library_dashboard.py check \
+  --outdir /mnt/e/Tree-Metal-F/enzyme_library
+```
+
+Use `--fetch` only when network access is acceptable. Without it, the script still builds from local metadata and FASTA, marking unresolved records in the output.
 
 ## Recommended Metal-F Setup
 

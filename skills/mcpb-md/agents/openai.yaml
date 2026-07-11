@@ -1,0 +1,3 @@
+﻿display_name: mcpb_md
+short_description: MCPB/GAMESS metal-center MD workflow
+default_prompt: Use $mcpb-md to run or audit a MCPB.py to GROMACS MD workflow.

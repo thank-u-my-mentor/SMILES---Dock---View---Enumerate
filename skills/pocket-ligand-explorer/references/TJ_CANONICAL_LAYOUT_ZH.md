@@ -35,6 +35,38 @@ E:/TJ/mcpb_m7_400ns/
   MCPB_BUG_AVOIDANCE_ZH.md
 ```
 
+Current active GROMACS production handoff:
+
+```text
+E:/TJ/mcpb_m7_400ns/05_gromacs/TJ_M7_FE_noTER_solv.amb2gmx/
+  TJ_M7_FE_noTER_solv_GMX.gro
+  TJ_M7_FE_noTER_solv_GMX.top
+  em.gro
+  nvt.gro
+  npt.gro
+  production_200ns.tpr
+  production_200ns.xtc
+  logs/mdrun_production_200ns.log
+```
+
+This is the preferred TJ production branch because it uses the cleaned
+`TJ_M7_FE_mcpbpy_no_internal_ter.pdb` receptor generated from MCPB output. The
+older `TJ_M7_FE_solv.amb2gmx` branch should be treated as a failed handoff: it
+contained internal Amber termini from MCPB `TER` records and produced an
+unphysical minimization overlap.
+
+The current production uses a 5 ps compressed trajectory interval:
+
+```text
+dt = 0.002 ps
+nstxout-compressed = 2500
+200 ns -> about 40,000 frames
+```
+
+Use 2 ps only when a short/key-window run needs higher temporal resolution.
+For whole 200-400 ns production, 5 ps is a better default for a reusable
+teaching workflow.
+
 ## Current Top-Level Audit
 
 Snapshot from 2026-06-18:

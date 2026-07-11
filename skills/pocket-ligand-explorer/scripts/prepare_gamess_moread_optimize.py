@@ -72,10 +72,10 @@ def main() -> int:
     parser.add_argument("--dat", type=Path, required=True)
     parser.add_argument("--charge", type=int, required=True)
     parser.add_argument("--mult", type=int, required=True)
-    parser.add_argument("--norb", type=int, default=630)
+    parser.add_argument("--norb", type=int, required=True)
     parser.add_argument("--nstep", type=int, default=60)
     parser.add_argument("--opttol", default="0.0002")
-    parser.add_argument("--scf-mode", choices=["diis", "soscf"], default="soscf")
+    parser.add_argument("--scf-mode", choices=["diis", "soscf", "very-damp"], default="soscf")
     parser.add_argument("--cores", type=int, default=8)
     parser.add_argument("--session", default=None)
     args = parser.parse_args()
@@ -91,8 +91,10 @@ def main() -> int:
         lines,
         "$CONTRL",
         (
-            " $CONTRL SCFTYP=UHF DFTTYP=B3LYP RUNTYP=OPTIMIZE "
-            f"ICHARG={args.charge} MULT={args.mult} MAXIT=200 $END"
+            " $CONTRL\n"
+            "  SCFTYP=UHF DFTTYP=B3LYP RUNTYP=OPTIMIZE\n"
+            f"  ICHARG={args.charge} MULT={args.mult} MAXIT=200 COORD=UNIQUE UNITS=ANGS\n"
+            " $END"
         ),
     )
     if args.scf_mode == "soscf":
@@ -100,6 +102,13 @@ def main() -> int:
             " $SCF\n"
             "  DIRSCF=.T. DIIS=.F. SOSCF=.T. DAMP=.T. SHIFT=.T.\n"
             "  ETHRSH=10.0 MAXDII=30\n"
+            " $END"
+        )
+    elif args.scf_mode == "very-damp":
+        scf_card = (
+            " $SCF\n"
+            "  DIRSCF=.T. DIIS=.F. SOSCF=.F. DAMP=.T. SHIFT=.T.\n"
+            "  ETHRSH=0.0 MAXDII=1\n"
             " $END"
         )
     else:
@@ -110,6 +119,15 @@ def main() -> int:
             " $END"
         )
     lines = replace_card(lines, "$SCF", scf_card)
+    lines = replace_card(
+        lines,
+        "$DFT",
+        (
+            " $DFT\n"
+            "  NRAD=96 NLEB=302 NRAD0=96 NLEB0=302 SWOFF=0.0\n"
+            " $END"
+        ),
+    )
     lines = replace_card(
         lines,
         "$STATPT",
@@ -135,7 +153,7 @@ NCORES=${{NCORES:-{args.cores}}}
 GAMESS=${{GAMESS:-/home/qin/softwares/gamess/rungms}}
 VERSION=${{VERSION:-00}}
 mkdir -p gamess_logs logs
-echo "[GAMESS] $JOB start $(date) NCORES=$NCORES MOREAD={args.dat} scf_mode={args.scf_mode}" | tee "gamess_logs/${{JOB}}.status"
+echo "[GAMESS] $JOB start $(date) NCORES=$NCORES MOREAD={args.dat} scf_mode={args.scf_mode} dft_grid=fine_from_start" | tee "gamess_logs/${{JOB}}.status"
 set +e
 "$GAMESS" "$JOB" "$VERSION" "$NCORES" > "gamess_logs/${{JOB}}.log" 2>&1
 rc=$?
@@ -195,7 +213,7 @@ echo "===== running ====="
 pgrep -af "${{JOB}}|ddikick|gamess.00.x" || true
 echo
 echo "===== markers ====="
-grep -E 'GUESS =|RUNTYP=|BEGINNING GEOMETRY|NSERCH|GRAD\\. MAX|CONVERGED|SCF IS UNCONVERGED|SCF HAS NOT CONVERGED|FINAL U-B3LYP|S-SQUARED|END OF GEOMETRY SEARCH|TERMINATED' "gamess_logs/${{JOB}}.log" 2>/dev/null | tail -n 120 || true
+grep -E 'GUESS =|RUNTYP=|NRAD0|NLEB0|SWOFF|DFT CODE IS SWITCHING|BEGINNING GEOMETRY|NSERCH|GRAD\\. MAX|CONVERGED|SCF IS UNCONVERGED|SCF HAS NOT CONVERGED|FINAL U-B3LYP|S-SQUARED|END OF GEOMETRY SEARCH|TERMINATED' "gamess_logs/${{JOB}}.log" 2>/dev/null | tail -n 120 || true
 echo
 echo "===== recent log ====="
 tail -n 80 "gamess_logs/${{JOB}}.log" 2>/dev/null || true

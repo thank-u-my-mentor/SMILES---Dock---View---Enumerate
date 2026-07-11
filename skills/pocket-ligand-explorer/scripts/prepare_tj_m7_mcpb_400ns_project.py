@@ -4,9 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import math
 import shutil
 from pathlib import Path
+
+from fix_fe_histidine_protonation import parse_pdb as parse_pdb_for_fe_his
+from fix_fe_histidine_protonation import repair_histidines
 
 
 ATOMIC_NUMBERS = {
@@ -206,13 +210,27 @@ USER_CHARGES
     )
     step1 = mcpb_dir / "01_run_mcpb_step1.sh"
     step1.write_text(
-        """#!/usr/bin/env bash
+        f"""#!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")"
+cd "$(dirname "${{BASH_SOURCE[0]}}")"
 set +u
 source /mnt/l/WSL/conda_envs/AmberTools25/amber.sh
 set -u
 MCPB.py -i mcpb.in -s 1 | tee logs/mcpb_step1.log
+/mnt/l/WSL/softwares/conda_envs/md/bin/python /mnt/e/Codex/skills/pocket-ligand-explorer/scripts/build_mcpb_visual_check_pdb.py \
+  --small-pdb {group_name}_small.pdb \
+  --mol2-dir "$PWD" \
+  --out {group_name}_small_visual_check.pdb \
+  --report logs/{group_name}_small_visual_check_report.tsv \
+  --model-charge {sm_charge} \
+  --mult {mult}
+/mnt/l/WSL/softwares/conda_envs/md/bin/python /mnt/e/Codex/skills/pocket-ligand-explorer/scripts/audit_mcpb_small_model_hydrogens.py \
+  --small-pdb {group_name}_small.pdb \
+  --mol2-dir "$PWD" \
+  --out logs/mcpb_small_model_hydrogen_audit.tsv \
+  --max-warnings "${{PLE_MCPB_H_WARNING_MAX:-2}}" \
+  --model-charge {sm_charge} \
+  --mult {mult}
 """,
         encoding="utf-8",
         newline="\n",
@@ -313,6 +331,22 @@ def add_m7_water_hydrogens_to_full_pdb(*, full_pdb: Path, small_model_pdb: Path,
     output, max_serial_current = add_missing_ha_atoms(output, start_serial=max_serial_current + 1)
     output.append("END")
     out_pdb.write_text("\n".join(output) + "\n", encoding="utf-8", newline="\n")
+    fix_fe_his_protonation_in_place(out_pdb)
+
+
+def fix_fe_his_protonation_in_place(path: Path) -> None:
+    lines, atoms = parse_pdb_for_fe_his(path)
+    output, report = repair_histidines(lines, atoms, metal_element="FE", cutoff=2.8, add_backbone_h=True)
+    path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8", newline="\n")
+    report_path = path.with_suffix(path.suffix + ".fe_his_repair.tsv")
+    with report_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["residue", "expected_resname", "metal", "donor", "donor_distance_A", "added_atoms", "removed_atoms", "status"],
+            delimiter="\t",
+        )
+        writer.writeheader()
+        writer.writerows(report)
 
 
 def add_missing_ha_atoms(lines: list[str], *, start_serial: int) -> tuple[list[str], int]:

@@ -1536,11 +1536,11 @@ def build_parser() -> argparse.ArgumentParser:
     md_run_parser.add_argument("--mdrun-args", default="")
     md_run_parser.add_argument("--mdrun-arg", action="append", default=[])
     md_run_parser.add_argument("--prepare-only", action="store_true", help="Only write the coherent MD scripts; do not execute them")
-    md_run_parser.add_argument("--background", action="store_true", help="Run 02_run_gromacs.sh in the background after preparation")
+    md_run_parser.add_argument("--background", action="store_true", help="Run 02_run_gromacs.sh in the background after preparation; postprocess is chained unless --skip-postprocess is set")
     md_run_parser.add_argument("--skip-postprocess", action="store_true", help="Skip automatic PBC/RDC/PyMOL postprocessing after a foreground run")
     md_run_parser.add_argument("--dry-run", action="store_true")
-    md_run_parser.add_argument("--center-group", default="1", help="GROMACS index group for centering during postprocess; default 1 Protein")
-    md_run_parser.add_argument("--output-group", default="0", help="GROMACS output group for postprocess; default 0 System")
+    md_run_parser.add_argument("--center-group", default="Protein", help="GROMACS index group or name for centering during postprocess; default Protein")
+    md_run_parser.add_argument("--output-group", default="System", help="GROMACS output group or name for postprocess; default System")
     md_run_parser.add_argument("--metal-radius", type=float, default=4.0)
     md_run_parser.add_argument("--carbon-color", default="green")
     md_run_parser.add_argument("--ligand-selection", default="resname LIG")
@@ -2265,6 +2265,13 @@ scale_factor {args.scale_factor:g}
         mcpb_input += f"naa_mol2files {ligand_mol2_name}\n"
     (outdir / "mcpb.in").write_text(mcpb_input, encoding="utf-8")
 
+    audit_model_args = ""
+    if args.smmodel_chg is not None and args.smmodel_spin is not None:
+        audit_model_args = f" \\\n  --model-charge {args.smmodel_chg} \\\n  --mult {args.smmodel_spin}"
+    visual_model_args = ""
+    if args.smmodel_chg is not None and args.smmodel_spin is not None:
+        visual_model_args = f" \\\n  --model-charge {args.smmodel_chg} \\\n  --mult {args.smmodel_spin}"
+
     with (outdir / "metal_coordination_candidates.csv").open("w", newline="", encoding="utf-8") as handle:
         fieldnames = [
             "source",
@@ -2289,6 +2296,16 @@ cd "$(dirname "${{BASH_SOURCE[0]}}")"
 export AMBERHOME={shlex.quote(str(args.amberhome or (args.ambertools_bin.parent if args.ambertools_bin else Path('/mnt/l/WSL/conda_envs/AmberTools25'))))}
 export PATH="$AMBERHOME/bin:$PATH"
 MCPB.py -i mcpb.in -s 1
+/mnt/l/WSL/softwares/conda_envs/md/bin/python /mnt/e/Codex/skills/pocket-ligand-explorer/scripts/build_mcpb_visual_check_pdb.py \\
+  --small-pdb {mcpb_group}_small.pdb \\
+  --mol2-dir "$PWD" \\
+  --out {mcpb_group}_small_visual_check.pdb \\
+  --report {mcpb_group}_small_visual_check_report.tsv{visual_model_args}
+/mnt/l/WSL/softwares/conda_envs/md/bin/python /mnt/e/Codex/skills/pocket-ligand-explorer/scripts/audit_mcpb_small_model_hydrogens.py \\
+  --small-pdb {mcpb_group}_small.pdb \\
+  --mol2-dir "$PWD" \\
+  --out mcpb_small_model_hydrogen_audit.tsv \\
+  --max-warnings "${{PLE_MCPB_H_WARNING_MAX:-2}}"{audit_model_args}
 """
     (outdir / "run_mcpb_step1.sh").write_text(run_script, encoding="utf-8")
     (outdir / "run_mcpb_step1.sh").chmod(0o755)
@@ -2301,6 +2318,16 @@ export PATH="$AMBERHOME/bin:$PATH"
 
 # Step 1 writes small/standard/large model PDBs and QM input files.
 MCPB.py -i mcpb.in -s 1
+/mnt/l/WSL/softwares/conda_envs/md/bin/python /mnt/e/Codex/skills/pocket-ligand-explorer/scripts/build_mcpb_visual_check_pdb.py \\
+  --small-pdb {mcpb_group}_small.pdb \\
+  --mol2-dir "$PWD" \\
+  --out {mcpb_group}_small_visual_check.pdb \\
+  --report {mcpb_group}_small_visual_check_report.tsv{visual_model_args}
+/mnt/l/WSL/softwares/conda_envs/md/bin/python /mnt/e/Codex/skills/pocket-ligand-explorer/scripts/audit_mcpb_small_model_hydrogens.py \\
+  --small-pdb {mcpb_group}_small.pdb \\
+  --mol2-dir "$PWD" \\
+  --out mcpb_small_model_hydrogen_audit.tsv \\
+  --max-warnings "${{PLE_MCPB_H_WARNING_MAX:-2}}"{audit_model_args}
 
 # Step 2 needs completed QM output for the small-model optimization/frequency job.
 # For Gaussian, run {mcpb_group}_small_opt.com and {mcpb_group}_small_fc.com first,
@@ -3140,6 +3167,7 @@ ROOT="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 cd "$ROOT"
 {env_lines}
 
+echo "[PLE] fixing trajectory PBC: raw md.xtc stays untouched; writing md_nojump.xtc and md_centered_compact.xtc/gro"
 ple md-fix-pbc --gmxdir {shlex.quote(str(gmx_dir))} --gmx {shlex.quote(str(args.gmx))}{gmxrc_arg}{ld_args} --center-group {shlex.quote(str(args.center_group))} --output-group {shlex.quote(str(args.output_group))}
 ple pymol-metal --structure {shlex.quote(str(gmx_dir / "md_centered_compact.gro"))} --trajectory {shlex.quote(str(gmx_dir / "md_centered_compact.xtc"))} --out {shlex.quote(str(pymol_dir / "show_metal_centered.pml"))} --radius {args.metal_radius:g} --carbon-color {shlex.quote(str(args.carbon_color))}
 ple md-rdc --gmxdir {shlex.quote(str(gmx_dir))} --outdir {shlex.quote(str(analysis_dir))} --topology {shlex.quote(str(gmx_dir / "md_centered_compact.gro"))} --trajectory {shlex.quote(str(gmx_dir / "md_centered_compact.xtc"))} --gro {shlex.quote(str(gmx_dir / "md_centered_compact.gro"))} --reference-pdb {shlex.quote(str(ref_pdb))} --ligand-selection {shlex.quote(str(args.ligand_selection))} --distance-cutoff {args.distance_cutoff:g} --stride {args.rdc_stride:d} --top-n {args.top_n:d} --velocity-threshold {args.velocity_threshold:g}
@@ -3177,14 +3205,27 @@ def md_run_command(args: argparse.Namespace) -> None:
         run(["bash", str(outdir / script_name)], dry_run=args.dry_run)
 
     run_script = outdir / "02_run_gromacs.sh"
+    background_script = run_script
+    if not args.skip_postprocess:
+        background_script = outdir / "04_run_gromacs_then_postprocess.sh"
+        background_script.write_text(
+            f"""#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+bash ./02_run_gromacs.sh
+bash {shlex.quote(postprocess_script.name)}
+""",
+            encoding="utf-8",
+        )
+        background_script.chmod(0o755)
     if args.background:
         logs_dir = outdir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         if args.dry_run:
-            print("$ nohup bash " + shlex.quote(str(run_script)) + " > " + shlex.quote(str(logs_dir / "run_gromacs_background.log")) + " 2>&1 &", flush=True)
+            print("$ nohup bash " + shlex.quote(str(background_script)) + " > " + shlex.quote(str(logs_dir / "run_gromacs_background.log")) + " 2>&1 &", flush=True)
             return
         handle = (logs_dir / "run_gromacs_background.log").open("ab")
-        proc = subprocess.Popen(["bash", str(run_script)], stdout=handle, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(["bash", str(background_script)], stdout=handle, stderr=subprocess.STDOUT)
         (logs_dir / "md.pid").write_text(str(proc.pid) + "\n", encoding="utf-8")
         print(f"started_pid={proc.pid}", flush=True)
         print(f"monitor=tail -f {logs_dir / 'run_gromacs_background.log'}", flush=True)

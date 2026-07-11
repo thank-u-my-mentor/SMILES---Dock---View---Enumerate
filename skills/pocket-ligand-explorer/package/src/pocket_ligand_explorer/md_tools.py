@@ -34,17 +34,19 @@ def fix_pbc_command(args: argparse.Namespace) -> None:
     centered_gro = gmxdir / args.centered_gro
 
     if args.gmxrc:
-        run_command(["bash", "-lc", f"{gmx_env_prefix(args)}\ncd {gmxdir}\nprintf '0\\n' | {gmx} trjconv -s {tpr.name} -f {xtc.name} -o {nojump.name} -pbc nojump"])
+        run_command(["bash", "-lc", f"{gmx_env_prefix(args)}\ncd {gmxdir}\nprintf '{args.output_group}\\n' | {gmx} trjconv -s {tpr.name} -f {xtc.name} -o {nojump.name} -pbc nojump"])
         run_command(["bash", "-lc", f"{gmx_env_prefix(args)}\ncd {gmxdir}\nprintf '{args.center_group}\\n{args.output_group}\\n' | {gmx} trjconv -s {tpr.name} -f {nojump.name} -o {centered.name} -pbc mol -center -ur compact"])
         run_command(["bash", "-lc", f"{gmx_env_prefix(args)}\ncd {gmxdir}\nprintf '{args.output_group}\\n' | {gmx} trjconv -s {tpr.name} -f {centered.name} -o {centered_gro.name} -dump 0"])
     else:
-        run_command([gmx, "trjconv", "-s", str(tpr), "-f", str(xtc), "-o", str(nojump), "-pbc", "nojump"], stdin="0\n")
+        run_command([gmx, "trjconv", "-s", str(tpr), "-f", str(xtc), "-o", str(nojump), "-pbc", "nojump"], stdin=f"{args.output_group}\n")
         run_command([gmx, "trjconv", "-s", str(tpr), "-f", str(nojump), "-o", str(centered), "-pbc", "mol", "-center", "-ur", "compact"], stdin=f"{args.center_group}\n{args.output_group}\n")
         run_command([gmx, "trjconv", "-s", str(tpr), "-f", str(centered), "-o", str(centered_gro), "-dump", "0"], stdin=f"{args.output_group}\n")
 
     print(f"nojump={nojump}", flush=True)
     print(f"centered={centered}", flush=True)
     print(f"centered_gro={centered_gro}", flush=True)
+    print(f"visualization_structure={centered_gro}", flush=True)
+    print(f"visualization_trajectory={centered}", flush=True)
 
 
 def write_show_metal_pml(
@@ -67,9 +69,11 @@ set ray_opaque_background, off
 set orthoscopic, on
 set valence, 0
 set stick_radius, 0.16
-set dash_color, yellow
+set dash_color, black
 set dash_width, 2.2
 set dash_radius, 0.045
+set label_color, black
+set label_size, 22
 set auto_zoom, off
 set defer_builds_mode, 3
 hide everything
@@ -78,7 +82,7 @@ color gray70, polymer.protein
 show sticks, resn LIG
 util.cbag resn LIG
 show spheres, ({metal_selection})
-set sphere_scale, 0.45, ({metal_selection})
+set sphere_scale, 0.1, ({metal_selection})
 
 python
 from pymol import cmd
@@ -93,14 +97,19 @@ def ple_show_metal(selection="{metal_selection}", radius={radius:.3f}):
     cmd.show("sticks", "metal_sidechains")
     cmd.color("{carbon_color}", "metal_sidechains and elem C")
     cmd.show("spheres", "metal_core")
-    cmd.set("sphere_scale", 0.45, "metal_core")
+    cmd.set("sphere_scale", 0.1, "metal_core")
+    cmd.set("label_size", 22)
+    cmd.set("label_color", "black")
     cmd.select("metal_donors", "metal_shell and (elem N+O+S) and not name N+O")
     print(f"[ple_show_metal] donors={{cmd.count_atoms('metal_donors')}}")
     for atom in cmd.get_model("metal_donors", state=1).atom:
         dist_name = f"metal_dist_{{atom.resn}}{{atom.resi}}_{{atom.name}}"
         cmd.distance(dist_name, "metal_core", f"index {{atom.index}}", cutoff=radius, mode=2, state=1)
-        cmd.hide("labels", dist_name)
-        cmd.color("yellow", dist_name)
+        cmd.show("labels", dist_name)
+        cmd.color("black", dist_name)
+        cmd.set("dash_color", "black", dist_name)
+        cmd.set("label_color", "black", dist_name)
+        cmd.set("label_size", 22, dist_name)
     cmd.zoom("metal_shell or metal_core or resn LIG", 8)
     cmd.deselect()
 
@@ -191,8 +200,8 @@ def add_md_tool_parsers(subparsers: argparse._SubParsersAction[argparse.Argument
     pbc.add_argument("--nojump", default="md_nojump.xtc")
     pbc.add_argument("--centered", default="md_centered_compact.xtc")
     pbc.add_argument("--centered-gro", default="md_centered_compact.gro")
-    pbc.add_argument("--center-group", default="1", help="GROMACS index group used for centering; default 1 Protein")
-    pbc.add_argument("--output-group", default="0", help="GROMACS output group; default 0 System")
+    pbc.add_argument("--center-group", default="Protein", help="GROMACS index group or name used for centering; default Protein")
+    pbc.add_argument("--output-group", default="System", help="GROMACS output group or name; default System")
 
     rdc = subparsers.add_parser("md-rdc", help="Build residue-distance-change dashboard from a GROMACS MD trajectory")
     rdc.add_argument("--gmxdir", type=Path, default=Path("md_handoff/gromacs"))
